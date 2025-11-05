@@ -1,0 +1,26 @@
+[project]
+name = "nbodytsp-python"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "numpy>=2.3.4",
+    "pygame>=2.6.1",
+    "pyopengl>=3.1.10",
+    "pywin32>=311 ; sys_platform == 'win32'",
+]
+
+[project.optional-dependencies]
+cuda13 = [
+    "cupy-cuda13x>=13.6.0",
+]
+cuda12 = [
+    "cupy-cuda12x>=13.6.0",
+]
+cuda11 = [
+    "cupy-cuda11x>=13.6.0",
+]
+
+[tool.setuptools]
+packages = ["tsp_nbody"]

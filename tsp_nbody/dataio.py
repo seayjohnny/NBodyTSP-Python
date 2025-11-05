@@ -1,0 +1,330 @@
+"""
+Data I/O Module for N-Body TSP Simulator
+
+Handles loading, preprocessing, and normalization of TSP coordinate data.
+"""
+
+import numpy as np
+from typing import Tuple, Optional
+from pathlib import Path
+
+
+class TSPDataLoader:
+    """Loads and preprocesses TSP coordinate data from files."""
+    
+    def __init__(self, filepath: str):
+        """
+        Initialize the data loader.
+        
+        Args:
+            filepath: Path to the coordinate file
+        """
+        self.filepath = Path(filepath)
+        self.coords = None
+        self.original_coords = None
+        self.n_cities = 0
+        self.geometric_center = None
+        self.normalizing_factor = 1.0
+        self.bounding_box = None
+        
+    def load_coordinates(self) -> np.ndarray:
+        """
+        Load city coordinates from file.
+        
+        Expected format: Each line contains "x y" (space or tab separated).
+        
+        Returns:
+            numpy array of shape (n, 2) with coordinates
+        """
+        if not self.filepath.exists():
+            raise FileNotFoundError(f"Coordinate file not found: {self.filepath}")
+        
+        coords_list = []
+        with open(self.filepath, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith('#'):  # Skip empty lines and comments
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        x, y = float(parts[0]), float(parts[1])
+                        coords_list.append([x, y])
+        
+        if not coords_list:
+            raise ValueError(f"No valid coordinates found in {self.filepath}")
+        
+        self.coords = np.array(coords_list, dtype=np.float32)
+        self.original_coords = self.coords.copy()
+        self.n_cities = len(self.coords)
+        
+        print(f"Loaded {self.n_cities} cities from {self.filepath.name}")
+        return self.coords
+    
+    def center_at_origin(self) -> Tuple[float, float]:
+        """
+        Center coordinates at the geometric center (origin).
+        
+        Returns:
+            Tuple of (center_x, center_y) that was subtracted
+        """
+        if self.coords is None:
+            raise ValueError("Must load coordinates first")
+        
+        center = np.mean(self.coords, axis=0)
+        self.coords -= center
+        self.geometric_center = tuple(center)
+        
+        print(f"Geometric center: ({center[0]:.4f}, {center[1]:.4f})")
+        return self.geometric_center
+    
+    def normalize_by_minimum_separation(self) -> float:
+        """
+        Normalize coordinates so minimum city separation is 1.0.
+        
+        Returns:
+            The normalizing factor applied
+        """
+        if self.coords is None:
+            raise ValueError("Must load coordinates first")
+        
+        # Calculate all pairwise distances
+        n = len(self.coords)
+        min_dist = float('inf')
+        
+        for i in range(n):
+            for j in range(i + 1, n):
+                dx = self.coords[i, 0] - self.coords[j, 0]
+                dy = self.coords[i, 1] - self.coords[j, 1]
+                dist = np.sqrt(dx * dx + dy * dy)
+                if dist < min_dist:
+                    min_dist = dist
+        
+        if min_dist < 1e-10:
+            raise ValueError("Cities are too close together (minimum separation near zero)")
+        
+        # Normalize
+        self.coords /= min_dist
+        self.normalizing_factor = min_dist
+        
+        print(f"Normalizing factor (min separation): {min_dist:.6f}")
+        return self.normalizing_factor
+    
+    def normalize_by_average_separation(self) -> float:
+        """
+        Normalize coordinates so average city separation is 1.0.
+        
+        Returns:
+            The normalizing factor applied
+        """
+        if self.coords is None:
+            raise ValueError("Must load coordinates first")
+        
+        # Calculate all pairwise distances
+        n = len(self.coords)
+        total_dist = 0.0
+        count = 0
+        
+        for i in range(n):
+            for j in range(i + 1, n):
+                dx = self.coords[i, 0] - self.coords[j, 0]
+                dy = self.coords[i, 1] - self.coords[j, 1]
+                dist = np.sqrt(dx * dx + dy * dy)
+                total_dist += dist
+                count += 1
+        
+        avg_dist = total_dist / count if count > 0 else 1.0
+        
+        if avg_dist < 1e-10:
+            raise ValueError("Average separation near zero")
+        
+        # Normalize
+        self.coords /= avg_dist
+        self.normalizing_factor = avg_dist
+        
+        print(f"Normalizing factor (avg separation): {avg_dist:.6f}")
+        return self.normalizing_factor
+    
+    def get_bounding_circle_radius(self) -> float:
+        """
+        Calculate the radius of the bounding circle (distance to farthest city).
+        
+        Returns:
+            Radius of bounding circle
+        """
+        if self.coords is None:
+            raise ValueError("Must load coordinates first")
+        
+        # Calculate distance from origin for each city
+        distances = np.sqrt(np.sum(self.coords ** 2, axis=1))
+        max_radius = np.max(distances)
+        
+        print(f"Bounding circle radius: {max_radius:.4f}")
+        return max_radius
+    
+    def get_bounding_box(self) -> Tuple[float, float, float, float]:
+        """
+        Calculate the bounding box of all cities.
+        
+        Returns:
+            Tuple of (min_x, min_y, max_x, max_y)
+        """
+        if self.coords is None:
+            raise ValueError("Must load coordinates first")
+        
+        min_x = np.min(self.coords[:, 0])
+        min_y = np.min(self.coords[:, 1])
+        max_x = np.max(self.coords[:, 0])
+        max_y = np.max(self.coords[:, 1])
+        
+        self.bounding_box = (min_x, min_y, max_x, max_y)
+        return self.bounding_box
+    
+    def get_smallest_separation(self) -> float:
+        """
+        Get the minimum distance between any two cities.
+        
+        Returns:
+            Minimum separation distance
+        """
+        if self.coords is None:
+            raise ValueError("Must load coordinates first")
+        
+        n = len(self.coords)
+        min_dist = float('inf')
+        
+        for i in range(n):
+            for j in range(i + 1, n):
+                dx = self.coords[i, 0] - self.coords[j, 0]
+                dy = self.coords[i, 1] - self.coords[j, 1]
+                dist = np.sqrt(dx * dx + dy * dy)
+                if dist < min_dist:
+                    min_dist = dist
+        
+        return min_dist
+    
+    def preprocess(self, normalize_method: str = 'minimum') -> dict:
+        """
+        Complete preprocessing pipeline: load, center, and normalize.
+        
+        Args:
+            normalize_method: 'minimum' or 'average' separation
+            
+        Returns:
+            Dictionary with preprocessing statistics
+        """
+        # Load data
+        self.load_coordinates()
+        
+        # Get initial bounding box
+        bbox_before = self.get_bounding_box()
+        radius_before = self.get_bounding_circle_radius()
+        
+        # Center at origin
+        center = self.center_at_origin()
+        
+        # Normalize
+        if normalize_method == 'minimum':
+            norm_factor = self.normalize_by_minimum_separation()
+        elif normalize_method == 'average':
+            norm_factor = self.normalize_by_average_separation()
+        else:
+            raise ValueError(f"Unknown normalization method: {normalize_method}")
+        
+        # Get final statistics
+        bbox_after = self.get_bounding_box()
+        radius_after = self.get_bounding_circle_radius()
+        min_sep = self.get_smallest_separation()
+        
+        stats = {
+            'n_cities': self.n_cities,
+            'geometric_center': center,
+            'normalizing_factor': norm_factor,
+            'bounding_box_before': bbox_before,
+            'bounding_box_after': bbox_after,
+            'radius_before': radius_before,
+            'radius_after': radius_after,
+            'min_separation': min_sep,
+        }
+        
+        print(f"\nPreprocessing complete!")
+        print(f"  Cities: {self.n_cities}")
+        print(f"  Bounding radius: {radius_after:.4f}")
+        print(f"  Min separation: {min_sep:.4f}")
+        
+        return stats
+
+
+def load_optimal_path(filepath: str) -> Optional[np.ndarray]:
+    """
+    Load optimal path from file (if available).
+    
+    Args:
+        filepath: Path to the optimal path file
+        
+    Returns:
+        Array of city indices representing the optimal path, or None if not found
+    """
+    filepath = Path(filepath)
+    if not filepath.exists():
+        print(f"Optimal path file not found: {filepath}")
+        return None
+    
+    path = []
+    with open(filepath, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith('#'):
+                # Path file might have just indices or index pairs
+                parts = line.split()
+                if parts:
+                    path.append(int(parts[0]))
+    
+    if path:
+        return np.array(path, dtype=np.int32)
+    return None
+
+
+def load_optimal_cost(filepath: str) -> Optional[float]:
+    """
+    Load optimal tour length from file (if available).
+    
+    Args:
+        filepath: Path to the optimal cost file
+        
+    Returns:
+        Optimal tour cost, or None if not found
+    """
+    filepath = Path(filepath)
+    if not filepath.exists():
+        print(f"Optimal cost file not found: {filepath}")
+        return None
+    
+    with open(filepath, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith('#'):
+                try:
+                    return float(line)
+                except ValueError:
+                    continue
+    
+    return None
+
+
+# Example usage
+if __name__ == "__main__":
+    # Test with a dataset
+    loader = TSPDataLoader("datasets/att48/coords.txt")
+    stats = loader.preprocess(normalize_method='minimum')
+    
+    print(f"\nCoordinates shape: {loader.coords.shape}")
+    print(f"First 5 cities:")
+    print(loader.coords[:5])
+    
+    # Try loading optimal path
+    opt_path = load_optimal_path("datasets/att48/path.txt")
+    if opt_path is not None:
+        print(f"\nOptimal path length: {len(opt_path)}")
+    
+    opt_cost = load_optimal_cost("datasets/att48/tour_len.txt")
+    if opt_cost is not None:
+        print(f"Optimal tour cost: {opt_cost}")
