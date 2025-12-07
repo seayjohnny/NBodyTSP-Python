@@ -1,3 +1,4 @@
+# ruff:noqa: F403 F405
 """
 OpenGL Renderer for N-Body TSP Simulator
 
@@ -5,11 +6,11 @@ Provides real-time GPU-accelerated visualization using OpenGL.
 """
 
 import numpy as np
-from typing import Optional, Tuple
+from typing import Optional, Tuple, TypedDict, TypeAlias
 import sys
 
 try:
-    from OpenGL.GL import *
+    from OpenGL.GL import *  
     from OpenGL.GLU import *
     import pygame
     from pygame.locals import *
@@ -24,34 +25,80 @@ try:
 except ImportError:
     WIN_GUI_AVAILABLE = False
 
+
+ColorType: TypeAlias = Tuple[float, float, float]
+
+class RendererOptions(TypedDict, total=False):
+    window_size: Tuple[int, int]
+    title: str
+    city_size: float
+    path_width: float
+    wall_width: float
+    color_background: ColorType
+    color_city: ColorType
+    color_path: ColorType
+    color_wall_contract: ColorType
+    color_wall_static: ColorType
+    color_wall_expand: ColorType
+    color_bubble: ColorType
+    color_density: ColorType
+    color_text: ColorType
+
+
+default_renderer_options: RendererOptions = {
+    "window_size": (800, 800),
+    "title": "N-Body TSP Simulator",
+    "city_size": 5.0,
+    "path_width": 2.0,
+    "wall_width": 2.0,
+    "color_background": (0.9, 0.9, 1.0),
+    "color_city": (0.2, 0.0, 1.0),
+    "color_path": (0.0, 0.5, 0.0),
+    "color_wall_contract": (1.0, 0.0, 0.0),
+    "color_wall_static": (0.3, 0.3, 0.0),
+    "color_wall_expand": (0.0, 0.0, 1.0),
+    "color_bubble": (0.2, 0.8, 1.0),
+    "color_density": (0.5, 0.5, 0.5),
+    "color_text": (1.0, 1.0, 1.0),
+}
+
+
 class TSPRenderer:
     """OpenGL renderer for visualizing N-body TSP simulation."""
     
-    def __init__(self, window_size: Tuple[int, int] = (800, 800), 
-                 title: str = "N-Body TSP Simulator"):
+    def __init__(self, options: RendererOptions = default_renderer_options):
         """
         Initialize the renderer.
-        
+
         Args:
             window_size: (width, height) of window
             title: Window title
         """
-        self.window_size = window_size
-        self.title = title
+
+        self.window_size = options.get("window_size", (800, 800))
+        self.title = options.get("title", "N-Body TSP Simulator")
         self.window = None
         self.clock = None
+        self.font = None
         self.is_initialized = False
-        
+        self.is_paused = False
+
+        # Sizes
+        self.city_size = options.get("city_size", 5.0)  # Point size for cities
+        self.path_width = options.get("path_width", 2.0)  # Line width for paths
+        self.wall_width = options.get("wall_width", 2.0)  # Line width for walls
+
         # Colors (RGB)
-        self.color_background = (0.0, 0.0, 0.0)
-        self.color_city = (1.0, 0.0, 0.0)
-        self.color_path = (0.0, 1.0, 0.0)
-        self.color_wall_contract = (1.0, 0.0, 0.0)
-        self.color_wall_static = (1.0, 1.0, 0.0)
-        self.color_wall_expand = (0.0, 0.0, 1.0)
-        self.color_bubble = (0.2, 0.8, 1.0)
-        self.color_density = (0.5, 0.5, 0.5)
-        
+        self.color_background = options.get("color_background", (0.0, 0.0, 0.0))
+        self.color_city = options.get("color_city", (1.0, 0.0, 0.0))
+        self.color_path = options.get("color_path", (0.0, 1.0, 0.0))
+        self.color_wall_contract = options.get("color_wall_contract", (1.0, 0.0, 0.0))
+        self.color_wall_static = options.get("color_wall_static", (1.0, 1.0, 0.0))
+        self.color_wall_expand = options.get("color_wall_expand", (0.0, 0.0, 1.0))
+        self.color_bubble = options.get("color_bubble", (0.2, 0.8, 1.0))
+        self.color_density = options.get("color_density", (0.5, 0.5, 0.5))
+        self.color_text = options.get("color_text", (1.0, 1.0, 1.0))
+
         if not OPENGL_AVAILABLE:
             print("Renderer created but OpenGL not available")
     
@@ -97,7 +144,14 @@ class TSPRenderer:
             
             # Set background color
             glClearColor(*self.color_background, 1.0)
-            
+
+            # Initialize font for text rendering
+            try:
+                self.font = pygame.font.Font(None, 24)  # Default system font, size 24
+            except Exception as e:
+                print(f"Warning: Failed to initialize font: {e}")
+                self.font = None
+
             # Focus window on Windows
             if WIN_GUI_AVAILABLE:
                 self.focus_window()
@@ -172,7 +226,7 @@ class TSPRenderer:
         glEnd()
     
     def draw_walls(self, inner_radius: float, outer_radius: float,
-                  inner_direction: int, outer_direction: int):
+                  inner_direction: int, outer_direction: int, width: float = 2.0):
         """
         Draw inner and outer circular walls with color-coded directions.
         
@@ -197,11 +251,11 @@ class TSPRenderer:
         # Draw inner wall
         if inner_radius > 0.001:
             inner_color = get_color(inner_direction)
-            self.draw_circle((0, 0), inner_radius, color=inner_color, width=2.0)
+            self.draw_circle((0, 0), inner_radius, color=inner_color, width=width)
         
         # Draw outer wall
         outer_color = get_color(outer_direction)
-        self.draw_circle((0, 0), outer_radius, color=outer_color, width=2.0)
+        self.draw_circle((0, 0), outer_radius, color=outer_color, width=width)
     
     def draw_path(self, coords: np.ndarray, path: np.ndarray,
                  width: float = 3.0, color: Optional[Tuple[float, float, float]] = None):
@@ -253,7 +307,7 @@ class TSPRenderer:
                          bins: int, max_density: Optional[float] = None):
         """
         Draw density heatmap as colored rectangles.
-        
+
         Args:
             density: Density values (bins*bins,)
             centers: Grid cell centers (bins*bins, 2)
@@ -263,45 +317,177 @@ class TSPRenderer:
         """
         if not self.is_initialized:
             return
-        
+
         if max_density is None:
             max_density = np.max(density) if len(density) > 0 else 1.0
-        
+
         min_x, min_y, max_x, max_y = bounds
         cell_width = (max_x - min_x) / bins
         cell_height = (max_y - min_y) / bins
-        
+
         for i in range(bins):
             for j in range(bins):
                 idx = i + j * bins
                 if idx >= len(density):
                     continue
-                
+
                 d = density[idx]
                 if d > 0:
                     # Color intensity based on density
                     intensity = min(d / max_density, 1.0)
                     glColor4f(intensity, intensity, intensity, 0.3)
-                    
+
                     # Draw rectangle
                     x = min_x + i * cell_width
                     y = min_y + j * cell_height
-                    
+
                     glBegin(GL_QUADS)
                     glVertex2f(x, y)
                     glVertex2f(x + cell_width, y)
                     glVertex2f(x + cell_width, y + cell_height)
                     glVertex2f(x, y + cell_height)
                     glEnd()
+
+    def draw_text(self, text: str, position: Tuple[int, int],
+                  color: Optional[Tuple[int, int, int]] = None):
+        """
+        Draw text overlay on the screen.
+
+        Args:
+            text: Text to display
+            position: (x, y) position in screen coordinates (pixels from top-left)
+            color: RGB color tuple (0-255 range), or None for default white
+        """
+        if not self.is_initialized or self.font is None:
+            return
+
+        color = color or (255, 255, 255)  # White by default
+
+        # Render text to a surface
+        text_surface = self.font.render(text, True, color)
+
+        # Get text dimensions
+        text_width = text_surface.get_width()
+        text_height = text_surface.get_height()
+
+        # Convert surface to raw data
+        text_data = pygame.image.tostring(text_surface, "RGBA", True)
+
+        # Save OpenGL state
+        glPushAttrib(GL_ALL_ATTRIB_BITS)
+        glMatrixMode(GL_PROJECTION)
+        glPushMatrix()
+        glLoadIdentity()
+
+        # Set up screen-space orthographic projection
+        glOrtho(0, self.window_size[0], self.window_size[1], 0, -1, 1)
+
+        glMatrixMode(GL_MODELVIEW)
+        glPushMatrix()
+        glLoadIdentity()
+
+        # Position raster
+        glRasterPos2i(position[0], position[1])
+
+        # Draw pixels
+        glDrawPixels(text_width, text_height, GL_RGBA, GL_UNSIGNED_BYTE, text_data)
+
+        # Restore OpenGL state
+        glPopMatrix()
+        glMatrixMode(GL_PROJECTION)
+        glPopMatrix()
+        glMatrixMode(GL_MODELVIEW)
+        glPopAttrib()
+
+    def draw_pressure_overlay(self, pressure: float, wall_gap: float):
+        """
+        Draw wall pressure information as text overlay.
+
+        Args:
+            pressure: Current wall pressure value
+            wall_gap: Distance between inner and outer walls
+        """
+        if not self.is_initialized or self.font is None:
+            return
+
+        # Format text with pressure info
+        pressure_text = f"Wall Pressure: {pressure:.2f}"
+        gap_text = f"Wall Gap: {wall_gap:.3f}"
+
+        # Position in top-left corner with padding
+        padding = 20
+        line_height = 25
+
+        # Draw pressure with color based on magnitude
+        if pressure > 100:
+            color = (255, 0, 0)  # Red for high pressure
+        elif pressure > 50:
+            color = (255, 255, 0)  # Yellow for medium pressure
+        else:
+            color = (255, 255, 255)  # White for low pressure
+
+        self.draw_text(pressure_text, (padding, padding), color)
+        self.draw_text(gap_text, (padding, padding + line_height), (255, 255, 255))
+
+    def draw_pause_indicator(self):
+        """Draw 'PAUSED' text overlay when simulation is paused."""
+        if not self.is_initialized or self.font is None or not self.is_paused:
+            return
+
+        # Draw "PAUSED" in the center of the screen
+        pause_text = "PAUSED (Click to Resume)"
+        text_surface = self.font.render(pause_text, True, (255, 255, 0))  # Yellow
+
+        # Calculate center position
+        text_width = text_surface.get_width()
+        x = (self.window_size[0] - text_width) // 2
+        y = self.window_size[1] // 2 - 50
+
+        # Draw with a semi-transparent black background for visibility
+        bg_padding = 10
+        bg_width = text_width + 2 * bg_padding
+        bg_height = text_surface.get_height() + 2 * bg_padding
+
+        # Save state
+        glPushAttrib(GL_ALL_ATTRIB_BITS)
+        glMatrixMode(GL_PROJECTION)
+        glPushMatrix()
+        glLoadIdentity()
+        glOrtho(0, self.window_size[0], self.window_size[1], 0, -1, 1)
+        glMatrixMode(GL_MODELVIEW)
+        glPushMatrix()
+        glLoadIdentity()
+
+        # Draw semi-transparent background
+        glColor4f(0.0, 0.0, 0.0, 0.7)
+        glBegin(GL_QUADS)
+        glVertex2f(x - bg_padding, y - bg_padding)
+        glVertex2f(x + text_width + bg_padding, y - bg_padding)
+        glVertex2f(x + text_width + bg_padding, y + text_surface.get_height() + bg_padding)
+        glVertex2f(x - bg_padding, y + text_surface.get_height() + bg_padding)
+        glEnd()
+
+        # Draw text
+        text_data = pygame.image.tostring(text_surface, "RGBA", True)
+        glRasterPos2i(x, y)
+        glDrawPixels(text_width, text_surface.get_height(), GL_RGBA, GL_UNSIGNED_BYTE, text_data)
+
+        # Restore state
+        glPopMatrix()
+        glMatrixMode(GL_PROJECTION)
+        glPopMatrix()
+        glMatrixMode(GL_MODELVIEW)
+        glPopAttrib()
     
     def draw_frame_complete(self, positions: np.ndarray, inner_radius: float,
                            outer_radius: float, inner_dir: int, outer_dir: int,
                            bubbles: Optional[np.ndarray] = None,
                            path: Optional[np.ndarray] = None,
-                           coords: Optional[np.ndarray] = None):
+                           coords: Optional[np.ndarray] = None,
+                           pressure: Optional[float] = None):
         """
         Draw a complete frame with all elements.
-        
+
         Args:
             positions: Current city positions
             inner_radius: Inner wall radius
@@ -311,23 +497,32 @@ class TSPRenderer:
             bubbles: Optional bubble array
             path: Optional path to draw
             coords: Original coordinates (needed if drawing path)
+            pressure: Optional wall pressure to display
         """
         self.clear()
-        
+
         # Draw bubbles (background)
         if bubbles is not None:
             self.draw_bubbles(bubbles)
-        
+
         # Draw walls
-        self.draw_walls(inner_radius, outer_radius, inner_dir, outer_dir)
-        
+        self.draw_walls(inner_radius, outer_radius, inner_dir, outer_dir, width=self.wall_width)
+
         # Draw path if provided
         if path is not None and coords is not None:
-            self.draw_path(coords, path, width=2.0, color=(0.0, 1.0, 0.0))
-        
+            self.draw_path(coords, path, width=self.path_width, color=self.color_path)
+
         # Draw cities (foreground)
-        self.draw_cities(positions, size=5.0)
-        
+        self.draw_cities(positions, size=self.city_size, color=self.color_city)
+
+        # Draw pressure overlay (foreground)
+        if pressure is not None:
+            wall_gap = outer_radius - inner_radius
+            self.draw_pressure_overlay(pressure, wall_gap)
+
+        # Draw pause indicator if paused
+        self.draw_pause_indicator()
+
         self.swap_buffers()
     
     def swap_buffers(self):
@@ -339,21 +534,30 @@ class TSPRenderer:
     def handle_events(self) -> bool:
         """
         Process window events.
-        
+
         Returns:
             True if should continue, False if quit requested
         """
         if not self.is_initialized:
             return False
-        
+
         for event in pygame.event.get():
             if event.type == QUIT:
                 return False
             if event.type == KEYDOWN:
                 if event.key == K_ESCAPE:
                     return False
-        
+            if event.type == MOUSEBUTTONDOWN:
+                if event.button == 1:  # Left mouse button
+                    self.toggle_pause()
+
         return True
+
+    def toggle_pause(self):
+        """Toggle pause state and print status."""
+        self.is_paused = not self.is_paused
+        status = "PAUSED" if self.is_paused else "RESUMED"
+        print(f"Simulation {status}")
     
     def wait_for_key(self):
         """Wait for user to press a key."""

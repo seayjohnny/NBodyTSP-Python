@@ -12,15 +12,16 @@ from pathlib import Path
 class TSPDataLoader:
     """Loads and preprocesses TSP coordinate data from files."""
     
-    def __init__(self, filepath: str):
+    def __init__(self, filepath: str | None = None, coords: np.ndarray | None = None):
         """
         Initialize the data loader.
         
         Args:
             filepath: Path to the coordinate file
+            coords: Optional numpy array of coordinates
         """
-        self.filepath = Path(filepath)
-        self.coords = None
+        self.filepath = Path(filepath) if filepath is not None else None
+        self.coords = coords
         self.original_coords = None
         self.n_cities = 0
         self.geometric_center = None
@@ -308,6 +309,47 @@ def load_optimal_cost(filepath: str) -> Optional[float]:
                     continue
     
     return None
+
+
+def generate_grid_dataset(
+    n_rows: int,
+    n_cols: int,
+) -> None:
+    """
+    Generate a grid dataset of city coordinates.
+    
+    Args:
+        n_rows: Number of rows in the grid
+        n_cols: Number of columns in the grid
+        
+    Returns:
+        numpy array of shape (n_rows * n_cols, 2) with grid coordinates
+    """
+    coords = []
+    for i in range(n_rows):
+        for j in range(n_cols):
+            x = j
+            y = i
+            coords.append([x, y])
+    
+    # The optimal cost for a grid is simply the number of cities
+    optimal_cost = n_rows * n_cols
+
+    # The optimal path can be a simple snake pattern
+    optimal_path = []
+    for i in range(n_rows):
+        row_indices = list(range(i * n_cols, (i + 1) * n_cols))
+        if i % 2 == 1:
+            row_indices.reverse()
+        optimal_path.extend(row_indices)
+
+    # Write to files
+    with open(f"grid_{n_rows}x{n_cols}_coords.txt", 'w') as f:
+        for coord in coords:
+            f.write(f"{coord[0]} {coord[1]}\n")
+
+    with open(f"grid_{n_rows}x{n_cols}_tour_len.txt", 'w') as f:
+        f.write(f"{optimal_cost}\n")
 
 
 # Example usage
