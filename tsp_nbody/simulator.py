@@ -15,7 +15,7 @@ from typing import Optional, Tuple, Dict
 # Import our modules
 from tsp_nbody.dataio import TSPDataLoader, load_optimal_path, load_optimal_cost
 from tsp_nbody.physics_engine import NBodyPhysicsEngine, NBodyPhysicsOptions, default_nbody_options
-from tsp_nbody.path_extraction import PathExtractor, nearest_neighbor_tsp
+from tsp_nbody.path_extraction import PathExtractor, random_nearest_neighbor_tsp
 from tsp_nbody.renderer import TSPRenderer, RendererOptions, default_renderer_options, OPENGL_AVAILABLE
 
 
@@ -54,6 +54,7 @@ class TSPNBodySimulator:
         self.physics_engine = None
         self.path_extractor = PathExtractor()
         self.renderer = None
+        self.debug_window = None
 
         # Simulation state
         self.is_initialized = False
@@ -88,6 +89,11 @@ class TSPNBodySimulator:
             "draw": True,
             "render_frequency": 10,  # Render every N physics steps
             "pause_initial": True,
+            "step_mode": "continuous",  # "continuous" or "step"
+
+            # Debug window
+            "debug_window": False,  # Enable separate debug window
+            "debug_update_frequency": 10,  # Update every N render frames
 
             # GPU
             "use_gpu": True,
@@ -144,6 +150,19 @@ class TSPNBodySimulator:
             else:
                 print("Rendering disabled or OpenGL not available")
 
+            # Initialize debug window if enabled
+            if self.params.get("debug_window", False):
+                try:
+                    from tsp_nbody.debug_window import DebugWindow
+                    self.debug_window = DebugWindow(
+                        title=f"Debug: {self.coord_file.name}",
+                        n_particles=self.n_cities
+                    )
+                    print("Debug window created")
+                except Exception as e:
+                    print(f"Warning: Could not create debug window: {e}")
+                    self.debug_window = None
+
             # Load optimal solution if available
             print("\n[4/4] Loading optimal solution (if available)...")
             dataset_dir = self.coord_file.parent
@@ -166,6 +185,16 @@ class TSPNBodySimulator:
 
             traceback.print_exc()
             return False
+
+    def get_smallest_distance(self) -> float:
+        """Calculate smallest inter-city distance."""
+        min_dist = float('inf')
+        for i in range(self.n_cities):
+            for j in range(i + 1, self.n_cities):
+                dist = np.linalg.norm(self.coords[i] - self.coords[j])
+                if dist < min_dist:
+                    min_dist = dist
+        return min_dist
 
     def compute_pressure(self) -> float:
         """Calculate pressure on outer wall."""
@@ -198,7 +227,7 @@ class TSPNBodySimulator:
         Args:
             dr: Step size for wall movement
         """
-        if self.nbody_options["use_improved_walls"]:
+        if self.nbody_options["use_pressure"]:
             # Use pressure-based control
             self.inner_radius += dr * self.inner_direction
             self.outer_radius += dr * self.outer_direction
@@ -207,8 +236,8 @@ class TSPNBodySimulator:
             self.inner_radius += dr
 
         # Ensure radii stay valid
-        self.inner_radius = max(0.0, self.inner_radius)
-        self.outer_radius = max(self.inner_radius + 0.01, self.outer_radius)
+        # self.inner_radius = max(0.0, self.inner_radius)
+        # self.outer_radius = max(self.inner_radius + 0.001, self.outer_radius)
 
     def render_frame(self, step: int = 0):
         """
@@ -223,25 +252,25 @@ class TSPNBodySimulator:
         # Get current positions from GPU
         positions = self.physics_engine.get_positions_cpu()
 
+        # Update and get density grid (pass outer_radius for normalization)
+        self.physics_engine.update_density_grid(self.outer_radius)
+        density_grid = self.physics_engine.get_density_grid_for_renderer()
+
         # Get bubble data if available
         bubbles = self.physics_engine.get_bubble_data_for_renderer()
 
         # Get current pressure
         pressure = self.physics_engine.current_pressure
 
-        # Normalize positions for rendering (to outer radius)
+        # Normalize positions for rendering (to current outer radius)
+        # This keeps the outer wall always at 1.0 visually
         if self.outer_radius > 0:
             positions_normalized = positions / self.outer_radius
             inner_r_normalized = self.inner_radius / self.outer_radius
-            outer_r_normalized = 1.0
+            outer_r_normalized = 1.0  # Outer wall is always at 1.0
 
-            # Normalize bubble positions too
-            if bubbles is not None:
-                bubbles_normalized = bubbles.copy()
-                bubbles_normalized[:, 0:2] /= self.outer_radius  # Normalize x, y
-                bubbles_normalized[:, 2] /= self.outer_radius  # Normalize radius
-            else:
-                bubbles_normalized = None
+            # Bubbles are already in normalized [-1, 1] space, just copy them
+            bubbles_normalized = bubbles.copy() if bubbles is not None else None
         else:
             positions_normalized = positions
             inner_r_normalized = self.inner_radius
@@ -256,8 +285,16 @@ class TSPNBodySimulator:
             self.inner_direction,
             self.outer_direction,
             bubbles=bubbles_normalized,
+            density_grid=density_grid,
+            grid_bins=self.physics_engine.grid_bins,
             pressure=pressure,
         )
+
+        # Update debug window if enabled
+        if self.debug_window and step % self.params.get("debug_update_frequency", 10) == 0:
+            debug_data = self.physics_engine.get_debug_data()
+            debug_data['step'] = step
+            self.debug_window.update(debug_data)
 
     def run_simulation(self) -> Tuple[np.ndarray, float]:
         """
@@ -278,6 +315,9 @@ class TSPNBodySimulator:
         # Get DR (wall step size)
         dr = self.nbody_options["DR"]
 
+        stop_separation = self.get_smallest_distance() * 0.5
+        # dr = self.outer_radius / 1000.0
+
         # Show initial configuration
         if self.params["draw"] and self.renderer:
             print("\nShowing initial configuration...")
@@ -293,13 +333,21 @@ class TSPNBodySimulator:
         last_print_radius = 0.0
 
         # Main loop: while inner < outer - DR
-        while self.inner_radius < self.outer_radius - dr:
+        while self.inner_radius + stop_separation < self.outer_radius:
+            if self.params["step_mode"] == "step":
+                    self.renderer.wait_for_key()
+
+            if self.renderer and self.renderer.is_paused:
+                self.renderer.wait_for_unpause()
+
+            self.step_walls(dr)
+
             for _ in range(self.params["steps_per_wall_move"]):
                 # Integrate one step
                 self.physics_engine.integrate_step(
                     self.inner_radius,
                     self.outer_radius,
-                    bubbles=None,  # No bubbles in MVP
+                    bubbles=None,  # Bubbles handled in kernel
                 )
 
                 # Render periodically
@@ -317,8 +365,21 @@ class TSPNBodySimulator:
                 draw_count += 1
                 total_steps += 1
 
+            # Update bubbles based on density grid
+            # Check if we should create/update bubbles (when inner wall is expanding)
+            if self.inner_direction > 0:
+                # Update density grid to find clusters
+                self.physics_engine.update_density_grid(self.outer_radius)
+
+                # Initialize bubbles if not already done
+                if not self.physics_engine.bubbles_enabled:
+                    self.physics_engine.initialize_bubbles(self.inner_radius, self.outer_radius)
+
+                # Grow existing bubbles
+                self.physics_engine.update_bubbles(dr, self.outer_radius)
+
             # Move walls after integration phase
-            if self.nbody_options["use_improved_walls"]:
+            if self.nbody_options["use_pressure"]:
                 pressure = self.compute_pressure()
                 self.update_wall_directions(pressure)
             else:
@@ -326,17 +387,11 @@ class TSPNBodySimulator:
                 self.inner_direction = 1
                 self.outer_direction = 0
 
-            self.step_walls(dr)
-
-            # Update bubble density periodically (if adaptive bubbles enabled)
-            if self.physics_engine.use_adaptive_bubbles:
-                self.physics_engine.update_bubble_density(self.outer_radius)
-
             # Progress indicator (print every 0.1 units of inner radius)
             if self.inner_radius - last_print_radius >= 0.1:
                 pressure = (
                     self.compute_pressure()
-                    if self.nbody_options["use_improved_walls"]
+                    if self.nbody_options["use_pressure"]
                     else 0.0
                 )
                 ke = self.physics_engine.compute_kinetic_energy()
@@ -371,13 +426,16 @@ class TSPNBodySimulator:
             positions_normalized = final_positions / self.outer_radius
             coords_normalized = self.coords / self.outer_radius
 
+            # Ensure projection with padding is active for final path display
+            # self.renderer.setup_padded_projection()
+
             self.renderer.clear()
             self.renderer.draw_path(
                 coords_normalized, self.final_path,
                 width=self.renderer.path_width,
                 color=self.renderer.color_path
             )
-            self.renderer.draw_cities(coords_normalized, size=self.renderer.city_size, color=self.renderer.color_city)
+            self.renderer.draw_cities(coords_normalized, size=1.0, color=self.renderer.color_city)
             self.renderer.swap_buffers()
 
             if self.params["pause_initial"]:
@@ -385,6 +443,11 @@ class TSPNBodySimulator:
                 self.renderer.wait_for_key()
         else:
             self.print_results()
+
+        # Clean up debug window
+        if self.debug_window:
+            self.debug_window.close()
+            self.debug_window = None
 
         return self.final_path, self.final_cost
 
@@ -396,6 +459,7 @@ class TSPNBodySimulator:
 
         print(f"\nDataset: {self.coord_file.name}")
         print(f"Cities: {self.n_cities}")
+        print(f"Elapsed time: {self.elapsed_time:.2f} seconds")
         print(f"N-body path cost: {self.final_cost:.4f}")
 
         if self.optimal_cost is not None:
@@ -413,13 +477,11 @@ class TSPNBodySimulator:
                 print("- Solution is >10% from optimal")
 
         # Calculate nearest neighbor for comparison
-        print("\nComparing with Nearest Neighbor heuristic...")
-        nn_path = nearest_neighbor_tsp(self.data_loader.original_coords)
-        nn_cost = self.path_extractor.calculate_path_cost(
-            self.data_loader.original_coords, nn_path
-        )
-
+        print("\nComparing with Nearest Neighbor heuristic: ")
+        print("Getting the best of 10 random starts...")
+        nn_path, nn_cost, nn_duration = random_nearest_neighbor_tsp(self.data_loader.original_coords, num_samples=10)
         print(f"Nearest Neighbor cost: {nn_cost:.4f}")
+        print(f"Nearest Neighbor elapsed time: {nn_duration:.2f} seconds")
         improvement = 100.0 * (nn_cost - self.final_cost) / nn_cost
         print(
             f"N-body vs NN: {improvement:+.2f}% "
@@ -441,35 +503,45 @@ def main():
         coord_file = sys.argv[1]
     else:
         # Default dataset
-        coord_file = "datasets/grid4x4/coords.txt"
+        coord_file = "datasets/att48/coords.txt"
 
     print("N-Body TSP Simulator")
     print(f"Using dataset: {coord_file}\n")
 
     # Create simulator with custom parameters (optional)
     nbody_options = {
-        "p": 9.073103,
-        "q": 13.695556,
-        "m": -1.5,
+        "p": 2.0,
+        "q": 1.0,
+        "m": .10,
         "slope_repulsion": 50.0,
-        "mag_attraction": 10.0,
+        "mag_attraction": 25,
         "force_cutoff_extra": 100,
+        "WALL_STRENGTH": 200.0,
+        "MASS": 80,
+        "DAMP": 20.0,
         "force_mode": "piecewise",
         "DT": 0.01,
         "use_gpu": True,
-        "use_improved_walls": True,
+        "use_pressure": False,
+        "use_adaptive_bubbles": True,
+        "lower_pressure_limit": 1.0,
+        "upper_pressure_limit": 10.0,
     }
 
     renderer_options = {
         "city_size": 16.0,
         "path_width": 4.0,
         "wall_width": 2.0,
+        "padding": 0.5,
     }
 
     params = {
         "draw": True,
         "use_gpu": True,
         "render_frequency": 1,
+        "steps_per_wall_move": 1,
+        # "debug_window": True,
+        # "step_mode": "step",
     }
 
     simulator = TSPNBodySimulator(

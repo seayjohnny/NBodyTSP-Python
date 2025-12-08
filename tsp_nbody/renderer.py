@@ -34,6 +34,7 @@ class RendererOptions(TypedDict, total=False):
     city_size: float
     path_width: float
     wall_width: float
+    padding: float  # Padding as fraction of view (e.g., 0.1 = 10%)
     color_background: ColorType
     color_city: ColorType
     color_path: ColorType
@@ -51,6 +52,7 @@ default_renderer_options: RendererOptions = {
     "city_size": 5.0,
     "path_width": 2.0,
     "wall_width": 2.0,
+    "padding": 0.1,  # 10% padding around edges
     "color_background": (0.9, 0.9, 1.0),
     "color_city": (0.2, 0.0, 1.0),
     "color_path": (0.0, 0.5, 0.0),
@@ -87,6 +89,7 @@ class TSPRenderer:
         self.city_size = options.get("city_size", 5.0)  # Point size for cities
         self.path_width = options.get("path_width", 2.0)  # Line width for paths
         self.wall_width = options.get("wall_width", 2.0)  # Line width for walls
+        self.padding = options.get("padding", 0.1)  # Padding fraction
 
         # Colors (RGB)
         self.color_background = options.get("color_background", (0.0, 0.0, 0.0))
@@ -126,14 +129,9 @@ class TSPRenderer:
             
             # Set up OpenGL viewport
             glViewport(0, 0, self.window_size[0], self.window_size[1])
-            
-            # Set up 2D orthographic projection
-            glMatrixMode(GL_PROJECTION)
-            glLoadIdentity()
-            glOrtho(-1.0, 1.0, -1.0, 1.0, -1.0, 1.0)
-            glMatrixMode(GL_MODELVIEW)
-            glLoadIdentity()
-            
+
+            # Set up 2D orthographic projection with padding
+            self.setup_padded_projection()
             # Enable features
             glEnable(GL_BLEND)
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
@@ -159,11 +157,28 @@ class TSPRenderer:
             self.is_initialized = True
             print(f"Renderer initialized: {self.window_size[0]}x{self.window_size[1]}")
             return True
-            
+
         except Exception as e:
             print(f"Failed to initialize renderer: {e}")
             return False
-    
+
+    def setup_padded_projection(self):
+        """
+        Set up the orthographic projection with padding.
+
+        Since the simulator normalizes everything so the outer wall is at 1.0,
+        we just need a fixed view with padding around it.
+        """
+        # View limit with padding (outer wall normalized to 1.0)
+        view_limit = 1.0 + self.padding
+
+        # Update projection matrix
+        glMatrixMode(GL_PROJECTION)
+        glLoadIdentity()
+        glOrtho(-view_limit, view_limit, -view_limit, view_limit, -1.0, 1.0)
+        glMatrixMode(GL_MODELVIEW)
+        glLoadIdentity()
+
     def clear(self):
         """Clear the display."""
         if not self.is_initialized:
@@ -284,69 +299,113 @@ class TSPRenderer:
     def draw_bubbles(self, bubbles: np.ndarray, alpha: float = 0.3):
         """
         Draw density bubbles.
-        
+
         Args:
             bubbles: Array of shape (n, 4) with (x, y, radius, active)
             alpha: Transparency (0-1)
         """
         if not self.is_initialized or bubbles is None or len(bubbles) == 0:
             return
-        
+
         for bubble in bubbles:
             if bubble[3] > 0.5:  # Check if active
                 x, y, r = bubble[0], bubble[1], bubble[2]
-                # Draw with transparency
+                # Draw filled circle with transparency
                 glColor4f(*self.color_bubble, alpha)
-                self.draw_circle((x, y), r, segments=50, filled=True)
-                # Draw outline
+                glBegin(GL_POLYGON)
+                for i in range(50):
+                    theta = 2.0 * np.pi * i / 50
+                    bx = x + r * np.cos(theta)
+                    by = y + r * np.sin(theta)
+                    glVertex2f(bx, by)
+                glEnd()
+
+                # Draw outline (opaque)
                 glColor3f(*self.color_bubble)
-                self.draw_circle((x, y), r, segments=50, width=1.0)
+                glLineWidth(2.0)
+                glBegin(GL_LINE_LOOP)
+                for i in range(50):
+                    theta = 2.0 * np.pi * i / 50
+                    bx = x + r * np.cos(theta)
+                    by = y + r * np.sin(theta)
+                    glVertex2f(bx, by)
+                glEnd()
     
-    def draw_density_grid(self, density: np.ndarray, centers: np.ndarray,
-                         bounds: Tuple[float, float, float, float],
-                         bins: int, max_density: Optional[float] = None):
+    def draw_density_grid(self, density: Optional[np.ndarray],
+                         bins: int, max_density: Optional[float] = None,
+                         draw_grid_lines: bool = True):
         """
-        Draw density heatmap as colored rectangles.
+        Draw density heatmap as colored rectangles with grid lines.
 
         Args:
-            density: Density values (bins*bins,)
-            centers: Grid cell centers (bins*bins, 2)
-            bounds: (min_x, min_y, max_x, max_y)
+            density: Density values (bins*bins,), or None
             bins: Number of bins per dimension
             max_density: Maximum density for color scaling
+            draw_grid_lines: Whether to draw grid lines
         """
         if not self.is_initialized:
             return
 
-        if max_density is None:
-            max_density = np.max(density) if len(density) > 0 else 1.0
+        min_x, min_y = -1.0, -1.0
+        cell_width = 2.0 / bins
+        cell_height = 2.0 / bins
 
-        min_x, min_y, max_x, max_y = bounds
-        cell_width = (max_x - min_x) / bins
-        cell_height = (max_y - min_y) / bins
+        # Draw colored rectangles for density (if data provided)
+        if density is not None and len(density) > 0:
+            if max_density is None:
+                max_density = np.max(density) if len(density) > 0 else 1.0
+                # Ensure we don't divide by zero
+                if max_density == 0:
+                    max_density = 1.0
 
-        for i in range(bins):
-            for j in range(bins):
-                idx = i + j * bins
-                if idx >= len(density):
-                    continue
+            for i in range(bins):
+                for j in range(bins):
+                    idx = i + j * bins
+                    if idx >= len(density):
+                        continue
 
-                d = density[idx]
-                if d > 0:
-                    # Color intensity based on density
-                    intensity = min(d / max_density, 1.0)
-                    glColor4f(intensity, intensity, intensity, 0.3)
+                    d = density[idx]
+                    if d > 0:
+                        # Color intensity based on density (like CUDA: density/sqrt(N))
+                        # Using sqrt scaling to make differences more visible
+                        intensity = min(np.sqrt(d / max_density), 1.0)
 
-                    # Draw rectangle
-                    x = min_x + i * cell_width
-                    y = min_y + j * cell_height
+                        # Use a color gradient: orange-red for density
+                        # More intense = more particles
+                        glColor4f(intensity, intensity * 0.5, 0.0, 0.4)
 
-                    glBegin(GL_QUADS)
-                    glVertex2f(x, y)
-                    glVertex2f(x + cell_width, y)
-                    glVertex2f(x + cell_width, y + cell_height)
-                    glVertex2f(x, y + cell_height)
-                    glEnd()
+                        # Draw filled rectangle
+                        # NOTE: Grid y=0 is at the TOP, so we flip when drawing
+                        x = min_x + i * cell_width
+                        y = min_y + (bins - 1 - j) * cell_height
+
+                        glBegin(GL_QUADS)
+                        glVertex2f(x, y)
+                        glVertex2f(x + cell_width, y)
+                        glVertex2f(x + cell_width, y + cell_height)
+                        glVertex2f(x, y + cell_height)
+                        glEnd()
+
+        # Always draw grid lines
+        if draw_grid_lines:
+            glLineWidth(1.0)
+            glColor4f(0.3, 0.3, 0.3, 0.5)  # Semi-transparent gray
+
+            # Vertical lines
+            for i in range(bins + 1):
+                x = min_x + i * cell_width
+                glBegin(GL_LINES)
+                glVertex2f(x, min_y)
+                glVertex2f(x, min_y + bins * cell_height)
+                glEnd()
+
+            # Horizontal lines
+            for j in range(bins + 1):
+                y = min_y + j * cell_height
+                glBegin(GL_LINES)
+                glVertex2f(min_x, y)
+                glVertex2f(min_x + bins * cell_width, y)
+                glEnd()
 
     def draw_text(self, text: str, position: Tuple[int, int],
                   color: Optional[Tuple[int, int, int]] = None):
@@ -482,6 +541,8 @@ class TSPRenderer:
     def draw_frame_complete(self, positions: np.ndarray, inner_radius: float,
                            outer_radius: float, inner_dir: int, outer_dir: int,
                            bubbles: Optional[np.ndarray] = None,
+                           density_grid: Optional[np.ndarray] = None,
+                           grid_bins: int = 8,
                            path: Optional[np.ndarray] = None,
                            coords: Optional[np.ndarray] = None,
                            pressure: Optional[float] = None):
@@ -495,18 +556,21 @@ class TSPRenderer:
             inner_dir: Inner wall direction
             outer_dir: Outer wall direction
             bubbles: Optional bubble array
+            density_grid: Optional density grid array
+            grid_bins: Number of grid bins per dimension
             path: Optional path to draw
             coords: Original coordinates (needed if drawing path)
             pressure: Optional wall pressure to display
         """
         self.clear()
 
-        # Draw bubbles (background)
-        if bubbles is not None:
-            self.draw_bubbles(bubbles)
+        # Draw density grid (always draw grid lines, color cells if data available)
+        self.draw_density_grid(density_grid, grid_bins)
 
         # Draw walls
         self.draw_walls(inner_radius, outer_radius, inner_dir, outer_dir, width=self.wall_width)
+        if bubbles is not None:
+            self.draw_bubbles(bubbles)
 
         # Draw path if provided
         if path is not None and coords is not None:
@@ -573,6 +637,24 @@ class TSPRenderer:
                     sys.exit()
                 if event.type == KEYDOWN:
                     waiting = False
+            pygame.time.wait(10)
+
+    def wait_for_unpause(self):
+        """Wait until simulation is unpaused."""
+        if not self.is_initialized:
+            return
+
+        if not self.is_paused:
+            return
+
+        while self.is_paused:
+            for event in pygame.event.get():
+                if event.type == QUIT:
+                    pygame.quit()
+                    sys.exit()
+                if event.type == MOUSEBUTTONDOWN:
+                    if event.button == 1:  # Left mouse button
+                        self.toggle_pause()
             pygame.time.wait(10)
     
     def limit_framerate(self, fps: int = 60):

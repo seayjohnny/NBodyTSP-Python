@@ -184,8 +184,9 @@ class AdaptiveBubbles:
     - Smoother bubble forces
     """
 
-    def __init__(self, grid_size=10, density_threshold=3.5,
-                 bubble_strength=20000.0, use_gpu=True):
+    def __init__(
+        self, positions, grid_size=8, density_threshold=3.5,
+        num_bubbles = 3, use_gpu=True):
         """
         Args:
             grid_size: Number of grid cells per dimension (for initial binning)
@@ -195,129 +196,81 @@ class AdaptiveBubbles:
         """
         self.grid_size = grid_size
         self.density_threshold = density_threshold
-        self.bubble_strength = bubble_strength
+        self.num_bubbles = num_bubbles
         self.use_gpu = use_gpu and cp is not None
 
-        # Active bubbles: list of (center_x, center_y, radius, strength)
+        # Active bubbles: list of (center_x, center_y, radius, enabled)
+        self.bounds = np.linspace(-1.0, 1.0, grid_size + 1)
         self.bubbles = []
+        self.grid_counts = []
+        self.grid_centers = []
 
-        # Bubble lifetime and growth parameters
-        self.min_radius = 0.5
-        self.max_radius = 10.0
-        self.growth_rate = 0.01  # Per timestep
-        self.decay_rate = 0.98    # Strength decay per timestep when not reinforced
+        self.initialize_bubbles(positions)
 
         if self.use_gpu:
             self._compile_gpu_kernel()
 
     def _compile_gpu_kernel(self):
-        """Compile CUDA kernel for bubble forces."""
-        self.bubble_kernel = cp.RawKernel(r'''
+        """Compile CUDA kernel for calculating where bubbles should spawn."""
+        self.density_kernel = cp.RawKernel(r'''
         extern "C" __global__
-        void computeBubbleForces(const float2* pos, float2* force,
-                                const float4* bubbles, int numBubbles, int N)
+        void computeDensity(const float2* pos, int* densityGrid, float2* gridCenters,
+                            float* bounds, int b, int N)
         {
-            int idx = blockIdx.x * blockDim.x + threadIdx.x;
-            if(idx >= N) return;
+            int x = blockIdx.x * blockDim.x + threadIdx.x;
+            int y = blockIdx.y * blockDim.y + threadIdx.y;
+            int id = x + y * gridDim.x * blockDim.x;
 
-            float2 p = pos[idx];
-            float2 f = make_float2(0.0f, 0.0f);
+            float xr[2] = {bounds[blockIdx.x], bounds[blockIdx.x + 1]};
+            float yr[2] = {bounds[b - 1 - blockIdx.y], bounds[b - blockIdx.y]};
+            float xBar = 0.0;
+            float yBar = 0.0;
 
-            // Check against all active bubbles
-            for(int i = 0; i < numBubbles; i++)
+            for(int i = 0; i < N; i++)
             {
-                float4 bubble = bubbles[i];  // (center.x, center.y, radius, strength)
+                densityGrid[id] = 0; // Initialize
+            }
 
-                float dx = p.x - bubble.x;
-                float dy = p.y - bubble.y;
-                float dist = sqrtf(dx*dx + dy*dy);
+            __syncthreads();
 
-                // Repulsive force inside bubble
-                if(dist < bubble.z && dist > 1e-10f)
+            for(int i = 0; i < N; i++)
+            {
+                // If the particle is in this grid cell, increment density
+                if(pos[i].x >= xr[0] && pos[i].x < xr[1] &&
+                   pos[i].y >= yr[0] && pos[i].y < yr[1])
                 {
-                    float penetration = bubble.z - dist;
-                    float forceMag = bubble.w * penetration / bubble.z;  // Linear with depth
-
-                    // Radial repulsion
-                    f.x += forceMag * dx / dist;
-                    f.y += forceMag * dy / dist;
+                    atomicAdd(&densityGrid[id], 1);
+                    xBar += pos[i].x;
+                    yBar += pos[i].y;
                 }
             }
 
-            force[idx] = f;
+            __syncthreads();
+
+            // If density > 0, compute center
+            if(densityGrid[id] > 0)
+            {
+                gridCenters[id].x = xBar / densityGrid[id];
+                gridCenters[id].y = yBar / densityGrid[id];
+            }
+
+            __syncthreads();
         }
-        ''', 'computeBubbleForces')
+        ''', 'computeDensity')
 
-    def update_density(self, positions, bounds_min, bounds_max):
-        """
-        Analyze particle density and create/update bubbles.
-
-        Args:
-            positions: Nx2 array of particle positions
-            bounds_min: (x_min, y_min) of simulation domain
-            bounds_max: (x_max, y_max) of simulation domain
-        """
-        xp = cp if self.use_gpu else np
-
-        # Convert to numpy for processing
-        if self.use_gpu:
-            pos_cpu = cp.asnumpy(positions)
-        else:
-            pos_cpu = positions
-
-        # Grid-based density analysis
-        grid_counts, grid_centers = self._compute_grid_density(
-            pos_cpu, bounds_min, bounds_max
-        )
-
-        # Update existing bubbles (decay strength)
-        self.bubbles = [
-            (cx, cy, r, s * self.decay_rate)
-            for cx, cy, r, s in self.bubbles
-            if s > 1.0  # Remove weak bubbles
-        ]
-
-        # Create new bubbles in dense regions
-        for i in range(self.grid_size):
-            for j in range(self.grid_size):
-                idx = i * self.grid_size + j
-                density = grid_counts[idx]
-
-                if density > self.density_threshold:
-                    center = grid_centers[idx]
-
-                    # Check if bubble already exists nearby
-                    existing = False
-                    for k, (cx, cy, r, s) in enumerate(self.bubbles):
-                        dist = np.sqrt((cx - center[0])**2 + (cy - center[1])**2)
-                        if dist < r * 1.5:
-                            # Reinforce existing bubble
-                            new_radius = min(r + self.growth_rate, self.max_radius)
-                            new_strength = min(s * 1.2, self.bubble_strength * 2.0)
-                            self.bubbles[k] = (cx, cy, new_radius, new_strength)
-                            existing = True
-                            break
-
-                    if not existing:
-                        # Create new bubble
-                        radius = self.min_radius * (density / self.density_threshold)
-                        self.bubbles.append((
-                            center[0], center[1], radius, self.bubble_strength
-                        ))
-
-    def _compute_grid_density(self, positions, bounds_min, bounds_max):
+    def _compute_grid_density(self, positions):
         """Compute particle density on a grid."""
         grid_counts = np.zeros(self.grid_size * self.grid_size, dtype=np.int32)
         grid_centers = np.zeros((self.grid_size * self.grid_size, 2), dtype=np.float32)
 
         # Grid cell dimensions
-        dx = (bounds_max[0] - bounds_min[0]) / self.grid_size
-        dy = (bounds_max[1] - bounds_min[1]) / self.grid_size
+        dx = (self.bounds[-1] - self.bounds[0]) / self.grid_size
+        dy = (self.bounds[-1] - self.bounds[0]) / self.grid_size
 
         # Bin particles into grid cells
         for p in positions:
-            i = int((p[0] - bounds_min[0]) / dx)
-            j = int((p[1] - bounds_min[1]) / dy)
+            i = int((p[0] - self.bounds[0]) / dx)
+            j = int((p[1] - self.bounds[0]) / dy)
 
             # Clamp to grid bounds
             i = max(0, min(i, self.grid_size - 1))
@@ -331,77 +284,51 @@ class AdaptiveBubbles:
             for j in range(self.grid_size):
                 idx = i * self.grid_size + j
                 grid_centers[idx] = [
-                    bounds_min[0] + (i + 0.5) * dx,
-                    bounds_min[1] + (j + 0.5) * dy
+                    self.bounds[0] + (i + 0.5) * dx,
+                    self.bounds[0] + (j + 0.5) * dy
                 ]
+
+        self.grid_counts = grid_counts
+        self.grid_centers = grid_centers
 
         return grid_counts, grid_centers
 
-    def compute_forces(self, positions):
+    def initialize_bubbles(self, positions):
+        """Create the initial bubble list.
+        
+        Bubbles are represented as (center_x, center_y, radius, enabled).
+        On GPU, this will be packed into a float4 array for efficiency.
         """
-        Compute bubble repulsion forces.
+        
+        grid_counts, grid_centers = self._compute_grid_density(positions)
+        
+        # Select top N densest cells to create bubbles
+        dense_indices = np.argsort(grid_counts)[-self.num_bubbles:]
+        self.bubbles = []
 
-        Args:
-            positions: Nx2 array of particle positions
+        for idx in dense_indices:
+            if grid_counts[idx] >= self.density_threshold:
+                center = grid_centers[idx]
+                radius = 0.1  # Initial radius
+                self.bubbles.append([center[0], center[1], radius, 1.0])  # Enabled
+        
+        return self.bubbles
 
-        Returns:
-            Nx2 array of force vectors
-        """
-        if len(self.bubbles) == 0:
-            xp = cp if self.use_gpu else np
-            return xp.zeros_like(positions)
+    def get_density_grid(self) -> tuple[list, list]:
+        """Return the density grid for external use."""
+        return self.grid_counts, self.grid_centers
 
-        n = len(positions)
+    def get_bubbles_gpu(self):
+        """Return bubbles as a GPU array for force calculations."""
+        if not self.use_gpu:
+            raise RuntimeError("GPU not enabled for AdaptiveBubbles")
 
-        if self.use_gpu:
-            return self._compute_gpu(positions, n)
-        else:
-            return self._compute_cpu(positions, n)
-
-    def _compute_gpu(self, positions, n):
-        """GPU implementation."""
-        xp = cp
-
-        # Pack bubbles into float4 array (center.x, center.y, radius, strength)
-        bubble_data = xp.array(self.bubbles, dtype=xp.float32)
-        num_bubbles = len(self.bubbles)
-
-        # Create float2 views
-        float2_dtype = cp.dtype([('x', cp.float32), ('y', cp.float32)])
-        pos_f2 = positions.view(float2_dtype).reshape(-1)
-        force_f2 = xp.zeros(n, dtype=float2_dtype)
-
-        threads = 256
-        blocks = (n + threads - 1) // threads
-
-        self.bubble_kernel(
-            (blocks,), (threads,),
-            (pos_f2, force_f2, bubble_data, xp.int32(num_bubbles), xp.int32(n))
-        )
-
-        return force_f2.view(xp.float32).reshape(n, 2)
-
-    def _compute_cpu(self, positions, n):
-        """CPU implementation."""
-        xp = np
-        force = xp.zeros_like(positions)
-
-        for cx, cy, radius, strength in self.bubbles:
-            dx = positions[:, 0] - cx
-            dy = positions[:, 1] - cy
-            dist = xp.sqrt(dx**2 + dy**2)
-
-            # Particles inside bubble
-            inside = (dist < radius) & (dist > 1e-10)
-
-            if xp.any(inside):
-                penetration = radius - dist[inside]
-                force_mag = strength * penetration / radius
-
-                force[inside, 0] += force_mag * dx[inside] / dist[inside]
-                force[inside, 1] += force_mag * dy[inside] / dist[inside]
-
-        return force
+        bubble_array = cp.array(self.bubbles, dtype=cp.float32)
+        return bubble_array
+        
+    def get_bubbles_cpu(self):
+        """Return bubbles as a CPU array for force calculations."""
+        return np.array(self.bubbles, dtype=np.float32)
 
     def get_bubble_info(self):
         """Return list of bubbles for visualization."""

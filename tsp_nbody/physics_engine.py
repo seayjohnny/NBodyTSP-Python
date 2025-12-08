@@ -36,6 +36,7 @@ class NBodyPhysicsOptions(TypedDict, total=False):
     m: float
     lower_pressure_limit: float
     upper_pressure_limit: float
+    use_pressure: bool
     use_improved_walls: bool
     use_adaptive_bubbles: bool
 
@@ -56,6 +57,7 @@ default_nbody_options: NBodyPhysicsOptions = {
     'm': -0.05,
     "lower_pressure_limit": 1.0,
     "upper_pressure_limit": 10.0,
+    'use_pressure': True,
     'use_improved_walls': False,
     'use_adaptive_bubbles': False,
 }
@@ -109,6 +111,11 @@ class NBodyPhysicsEngine:
         self.q = options.get('q', 12)
         self.m = options.get('m', -0.05)
 
+        # Pressure parameters
+        self.lower_pressure_limit = options.get('lower_pressure_limit', 500)
+        self.upper_pressure_limit = options.get('upper_pressure_limit', 1000)
+        self.use_pressure = options.get('use_pressure', True)
+
         # Advanced features
         self.use_improved_walls = options.get('use_improved_walls', False)  # Recommended: prevents bleeding
         self.use_adaptive_bubbles = options.get('use_adaptive_bubbles', False)  # Enable for dense datasets
@@ -124,9 +131,10 @@ class NBodyPhysicsEngine:
         # Initialize adaptive bubbles
         if self.use_adaptive_bubbles:
             self.adaptive_bubbles = AdaptiveBubbles(
+                self.coords,
                 grid_size=10,
                 density_threshold=3.5,
-                bubble_strength=20000.0,
+                num_bubbles=3,
                 use_gpu=self.use_gpu,
             )
         else:
@@ -134,6 +142,18 @@ class NBodyPhysicsEngine:
 
         # Pressure tracking (for visualization)
         self.current_pressure = 0.0
+
+        # Density grid tracking (for visualization)
+        self.grid_bins = 8  # 8x8 grid like CUDA version
+        self.grid_bounds = np.linspace(-1.0, 1.0, self.grid_bins + 1)
+        self.density_grid = np.zeros(self.grid_bins * self.grid_bins, dtype=np.int32)
+        self.density_centers = np.zeros((self.grid_bins * self.grid_bins, 2), dtype=np.float32)
+
+        # Bubble management (like CUDA version)
+        self.min_bin_density = 3  # Minimum density to spawn a bubble
+        self.max_bubbles = 5  # Maximum number of bubbles (spawn at top B densest cells)
+        self.bubbles = np.zeros((self.grid_bins * self.grid_bins, 4), dtype=np.float32)  # (x, y, radius, active)
+        self.bubbles_enabled = False  # Will be enabled when pressure is right
 
         if self.use_gpu:
             self._compile_kernels()
@@ -168,6 +188,7 @@ class NBodyPhysicsEngine:
             r"""
         extern "C" __global__
         void nBodyStepPiecewiseLJ(const float2* shInitPos, float2* shPos, float2* vel, float2* acc,
+                              float4* bubbles, int numBubbles,
                               float slopeRepulsion, float magAttraction, float forceCutoffDist,
                               float iR, float oR, int N, float WALL_STRENGTH, float DAMP,
                               float FORCE_CUTOFF, float MASS)
@@ -224,6 +245,8 @@ class NBodyPhysicsEngine:
                 }
             }
 
+            __syncthreads();
+
             // Wall forces
             radius = sqrtf(currentPos.x*currentPos.x + currentPos.y*currentPos.y);
             if(radius < iR && radius > 1e-10f)
@@ -239,6 +262,36 @@ class NBodyPhysicsEngine:
                 force.y += forceMag * currentPos.y / radius;
             }
 
+            __syncthreads();
+
+            // Bubble forces
+            for(int b = 0; b < numBubbles; b++)
+            {
+                float4 bubble = bubbles[b];
+
+                // Only apply force if bubble is active
+                if(bubble.w > 0.5f)
+                {
+                    float2 bubbleCenter = make_float2(bubble.x, bubble.y);
+                    float bubbleRadius = bubble.z;
+
+                    float2 diff = make_float2(currentPos.x - bubbleCenter.x,
+                                              currentPos.y - bubbleCenter.y);
+                    float dist = sqrtf(diff.x*diff.x + diff.y*diff.y);
+
+                    if(dist < bubbleRadius && dist > 1e-10f)
+                    {
+                        float penetration = bubbleRadius - dist;
+                        float forceMag = WALL_STRENGTH * penetration;
+
+                        force.x += forceMag * diff.x / dist;
+                        force.y += forceMag * diff.y / dist;
+                    }
+                }
+            }
+
+            __syncthreads();
+
             // Damping
             force.x -= DAMP * currentVel.x;
             force.y -= DAMP * currentVel.y;
@@ -249,16 +302,74 @@ class NBodyPhysicsEngine:
 
             // Update acceleration
             acc[idx] = make_float2(force.x / MASS, force.y / MASS);
+
+            __syncthreads();
+
+            // Update positions and velocities. We update position first to utilize
+            // leap-frog integration.
+            vel[idx].x += acc[idx].x * 0.01f;
+            vel[idx].y += acc[idx].y * 0.01f;
+
+            shPos[idx].x += currentVel.x * 0.01f;
+            shPos[idx].y += currentVel.y * 0.01f;
         }
         """,
             "nBodyStepPiecewiseLJ",
         )
 
+        # Density grid kernel (for visualization)
+        self.density_kernel = cp.RawKernel(r'''
+        extern "C" __global__
+        void computeDensity(const float2* pos, int* densityGrid, float2* densityCenters,
+                            const float* bounds, int bins, int N)
+        {
+            int x = blockIdx.x;
+            int y = blockIdx.y;
+            int id = x + y * bins;
+
+            // Get bounds for this cell
+            float xr_min = bounds[x];
+            float xr_max = bounds[x + 1];
+            float yr_min = bounds[bins - 1 - y];
+            float yr_max = bounds[bins - y];
+
+            float xBar = 0.0f;
+            float yBar = 0.0f;
+            int count = 0;
+
+            // Count particles in this cell
+            for(int i = 0; i < N; i++)
+            {
+                if(pos[i].x >= xr_min && pos[i].x < xr_max &&
+                   pos[i].y >= yr_min && pos[i].y < yr_max)
+                {
+                    count++;
+                    xBar += pos[i].x;
+                    yBar += pos[i].y;
+                }
+            }
+
+            densityGrid[id] = count;
+
+            // Compute center if density > 0
+            if(count > 0)
+            {
+                densityCenters[id].x = xBar / count;
+                densityCenters[id].y = yBar / count;
+            }
+            else
+            {
+                densityCenters[id].x = 0.0f;
+                densityCenters[id].y = 0.0f;
+            }
+        }
+        ''', 'computeDensity')
+
         self.nbody_smooth_lj_kernel = cp.RawKernel(
             r"""
         extern "C" __global__
         void nBodyStepSmoothLJ(const float2* shInitPos, float2* shPos, float2* vel, float2* acc,
-                              float p, float q, float m,
+                              float p, float q, float h,
                               float iR, float oR, int N, float WALL_STRENGTH, float DAMP,
                               float FORCE_CUTOFF, float MASS)
         {
@@ -271,7 +382,7 @@ class NBodyPhysicsEngine:
             float2 initPos = shInitPos[idx];
 
             float2 force = make_float2(0.0f, 0.0f);
-            float d, edgeLength, radius, forceMag, h, c;
+            float d, edgeLength, radius, forceMag, g;
 
             // N-body interactions (piecewise Lennard-Jones approximation)
             for(int i = 0; i < N; i++)
@@ -283,7 +394,7 @@ class NBodyPhysicsEngine:
                                               shPos[i].y - currentPos.y);
 
                     d = sqrtf(diff.x*diff.x + diff.y*diff.y);
-                    if(d < 1e-10f) d = 1e-10f;  // Avoid singularity
+                    if(d < 1e-10f) d = 1e-5f;  // Avoid singularity
 
                     // Initial distance (equilibrium length for this pair)
                     float2 initDiff = make_float2(shInitPos[i].x - initPos.x,
@@ -291,14 +402,15 @@ class NBodyPhysicsEngine:
                     edgeLength = sqrtf(initDiff.x*initDiff.x + initDiff.y*initDiff.y);
 
                     // Smooth Lennard-Jones force calculation
-                    h = m * (powf(powf(q/p, 1.0/(q - p))*edgeLength, p))/(1.0 - p/q);
-                    c = powf(edgeLength/d, q-p);
-                    forceMag = (c - 1) * h / powf(d, p);
+                    g = h * powf(edgeLength, q-p);
+                    forceMag = g/powf(d, q) - h/powf(d, p);
 
                     force.x += forceMag * diff.x / d;
                     force.y += forceMag * diff.y / d;
                 }
             }
+
+            __syncthreads();
 
             // Wall forces
             radius = sqrtf(currentPos.x*currentPos.x + currentPos.y*currentPos.y);
@@ -315,6 +427,8 @@ class NBodyPhysicsEngine:
                 force.y += forceMag * currentPos.y / radius;
             }
 
+            __syncthreads();
+
             // Damping
             force.x -= DAMP * currentVel.x;
             force.y -= DAMP * currentVel.y;
@@ -325,6 +439,15 @@ class NBodyPhysicsEngine:
 
             // Update acceleration
             acc[idx] = make_float2(force.x / MASS, force.y / MASS);
+
+            __syncthreads();
+
+            // Update positions and velocities. We update position first to utilize
+            // leap-frog integration.
+            shPos[idx].x += currentVel.x * 0.01f;
+            shPos[idx].y += currentVel.y * 0.01f;
+            vel[idx].x += acc[idx].x * 0.01f;
+            vel[idx].y += acc[idx].y * 0.01f;
         }
         """,
             "nBodyStepSmoothLJ",
@@ -455,12 +578,27 @@ class NBodyPhysicsEngine:
         """Perform TSP integration using GPU kernel."""
         # Create structured dtype for float2
         float2_dtype = cp.dtype([("x", cp.float32), ("y", cp.float32)])
+        float4_dtype = cp.dtype([("x", cp.float32), ("y", cp.float32), ("z", cp.float32), ("w", cp.float32)])
 
         # Create views as float2 structured arrays
         pos_f2 = self.pos.view(float2_dtype).reshape(-1)
         vel_f2 = self.vel.view(float2_dtype).reshape(-1)
         acc_f2 = self.acc.view(float2_dtype).reshape(-1)
         init_pos_f2 = self.coords.view(float2_dtype).reshape(-1)
+
+        # Get active bubbles for GPU
+        if self.bubbles_enabled:
+            # Convert bubbles from normalized space back to world space for kernel
+            bubbles_cpu = self.bubbles.copy()
+            bubbles_cpu[:, 0:2] *= outer_radius  # Denormalize x, y positions
+            bubbles_cpu[:, 2] *= outer_radius    # Denormalize radius
+
+            bubbles_gpu = cp.asarray(bubbles_cpu, dtype=cp.float32)
+            bubbles_f4 = bubbles_gpu.view(float4_dtype).reshape(-1)
+            num_bubbles = len(bubbles_f4)
+        else:
+            bubbles_f4 = cp.zeros(1, dtype=float4_dtype)
+            num_bubbles = 0
 
         threads_per_block = 256
         blocks = (self.n_cities + threads_per_block - 1) // threads_per_block
@@ -500,6 +638,8 @@ class NBodyPhysicsEngine:
                     pos_f2,
                     vel_f2,
                     acc_f2,
+                    bubbles_f4,
+                    cp.int32(num_bubbles),
                     cp.float32(self.slope_repulsion),
                     cp.float32(self.mag_attraction),
                     cp.float32(self.force_cutoff_extra),
@@ -513,21 +653,21 @@ class NBodyPhysicsEngine:
                 ),
             )
 
-        # Add improved wall forces if enabled
-        if self.use_improved_walls:
-            wall_force = self.improved_walls.compute_forces(
-                self.pos, inner_radius, outer_radius
-            )
-            self.acc += wall_force / self.MASS
+        # # Add improved wall forces if enabled
+        # if self.use_improved_walls:
+        #     wall_force = self.improved_walls.compute_forces(
+        #         self.pos, inner_radius, outer_radius
+        #     )
+        #     self.acc += wall_force / self.MASS
 
-        # Add adaptive bubble forces if enabled
-        if self.use_adaptive_bubbles:
-            bubble_force = self.adaptive_bubbles.compute_forces(self.pos)
-            self.acc += bubble_force / self.MASS
+        # # Add adaptive bubble forces if enabled
+        # if self.use_adaptive_bubbles:
+        #     bubble_force = self.adaptive_bubbles.compute_forces(self.pos)
+        #     self.acc += bubble_force / self.MASS
 
         # Update velocities and positions
-        self.vel += self.acc * self.DT
-        self.pos += self.vel * self.DT
+        # self.pos += self.vel * self.DT
+        # self.vel += self.acc * self.DT
 
     def integrate_step_tsp_cpu(self, inner_radius: float, outer_radius: float):
         """Perform TSP integration using CPU."""
@@ -643,6 +783,12 @@ class NBodyPhysicsEngine:
             return cp.asnumpy(self.vel)
         return self.vel.copy()
 
+    def get_accelerations_cpu(self) -> np.ndarray:
+        """Get current accelerations as a CPU numpy array."""
+        if self.use_gpu:
+            return cp.asnumpy(self.acc)
+        return self.acc.copy()
+
     def compute_kinetic_energy(self) -> float:
         """Calculate total kinetic energy of the system."""
         xp = self.xp
@@ -664,7 +810,7 @@ class NBodyPhysicsEngine:
         total_pressure = xp.sum(beyond)
 
         circumference = 2.0 * np.pi * outer_radius
-        pressure = float(total_pressure) / circumference
+        pressure = float(total_pressure) * float(self.WALL_STRENGTH) / circumference
 
         if self.use_gpu:
             pressure = float(cp.asnumpy(pressure))
@@ -674,27 +820,166 @@ class NBodyPhysicsEngine:
 
         return pressure
 
-    def update_bubble_density(self, outer_radius: float):
+    def compute_density_grid_gpu(self, outer_radius: float = 1.0):
         """
-        Update adaptive bubble density analysis.
-
-        Call this periodically (e.g., every 10 steps) when using adaptive bubbles.
+        Compute density grid on GPU.
 
         Args:
-            outer_radius: Current outer wall radius (used for bounds)
+            outer_radius: Current outer wall radius for normalization
         """
-        if not self.use_adaptive_bubbles:
+        # Normalize positions to [-1, 1] space (grid is in normalized coords)
+        pos_normalized = self.pos / outer_radius
+
+        # Create float2 views
+        float2_dtype = cp.dtype([('x', cp.float32), ('y', cp.float32)])
+        pos_f2 = pos_normalized.view(float2_dtype).reshape(-1)
+
+        # Allocate GPU arrays
+        density_gpu = cp.zeros(self.grid_bins * self.grid_bins, dtype=cp.int32)
+        centers_gpu = cp.zeros(self.grid_bins * self.grid_bins, dtype=float2_dtype)
+        bounds_gpu = cp.asarray(self.grid_bounds, dtype=cp.float32)
+
+        # Launch kernel with 2D grid
+        grid_dim = (self.grid_bins, self.grid_bins)
+
+        self.density_kernel(
+            grid_dim, (1,),
+            (pos_f2, density_gpu, centers_gpu, bounds_gpu,
+             cp.int32(self.grid_bins), cp.int32(self.n_cities))
+        )
+
+        # Copy results back
+        self.density_grid = cp.asnumpy(density_gpu)
+        centers_2d = centers_gpu.view(cp.float32).reshape(-1, 2)
+        self.density_centers = cp.asnumpy(centers_2d)
+
+    def compute_density_grid_cpu(self, outer_radius: float = 1.0):
+        """
+        Compute density grid on CPU.
+
+        Args:
+            outer_radius: Current outer wall radius for normalization
+        """
+        # Reset grid
+        self.density_grid.fill(0)
+        self.density_centers.fill(0)
+
+        # Normalize positions to [-1, 1] space
+        pos_normalized = self.pos / outer_radius if outer_radius > 0 else self.pos
+
+        # Temporary arrays for computing centers
+        x_sums = np.zeros(self.grid_bins * self.grid_bins, dtype=np.float32)
+        y_sums = np.zeros(self.grid_bins * self.grid_bins, dtype=np.float32)
+
+        # Bin particles
+        for i in range(self.n_cities):
+            x, y = pos_normalized[i, 0], pos_normalized[i, 1]
+
+            # Find grid cell
+            x_idx = np.searchsorted(self.grid_bounds[1:], x)
+            y_idx = self.grid_bins - 1 - np.searchsorted(self.grid_bounds[1:], y)
+
+            # Clamp to grid
+            x_idx = max(0, min(x_idx, self.grid_bins - 1))
+            y_idx = max(0, min(y_idx, self.grid_bins - 1))
+
+            cell_id = x_idx + y_idx * self.grid_bins
+
+            self.density_grid[cell_id] += 1
+            x_sums[cell_id] += x
+            y_sums[cell_id] += y
+
+        # Compute centers
+        for i in range(self.grid_bins * self.grid_bins):
+            if self.density_grid[i] > 0:
+                self.density_centers[i, 0] = x_sums[i] / self.density_grid[i]
+                self.density_centers[i, 1] = y_sums[i] / self.density_grid[i]
+
+    def update_density_grid(self, outer_radius: float = 1.0):
+        """
+        Update the density grid based on current particle positions.
+
+        Args:
+            outer_radius: Current outer wall radius for normalization
+        """
+        if self.use_gpu:
+            self.compute_density_grid_gpu(outer_radius)
+        else:
+            self.compute_density_grid_cpu(outer_radius)
+
+    def get_density_grid_for_renderer(self) -> Optional[np.ndarray]:
+        """
+        Get density grid in format expected by renderer.
+
+        Returns:
+            Array of density values for each grid cell
+        """
+        return self.density_grid.copy()
+
+    def initialize_bubbles(self, inner_radius: float, outer_radius: float):
+        """
+        Initialize bubbles at the top B most dense grid cells (CUDA version logic).
+
+        Args:
+            inner_radius: Starting radius for bubbles (in world space)
+            outer_radius: Current outer radius (for normalization)
+        """
+        # Reset all bubbles
+        self.bubbles[:] = 0.0
+
+        # Normalize inner radius to [-1, 1] space
+        inner_r_norm = inner_radius / outer_radius if outer_radius > 0 else inner_radius
+
+        # Find cells that meet minimum density threshold
+        dense_cells = np.where(self.density_grid >= self.min_bin_density)[0]
+
+        if len(dense_cells) > 0:
+            # Get densities of those cells
+            dense_cell_densities = self.density_grid[dense_cells]
+
+            # Sort by density (descending) and take top MAX_BUBBLES
+            sorted_indices = np.argsort(dense_cell_densities)[::-1]
+            top_cells = dense_cells[sorted_indices[:self.max_bubbles]]
+
+            # Create bubbles at top B densest cells
+            for cell_idx in top_cells:
+                self.bubbles[cell_idx, 0] = self.density_centers[cell_idx, 0]  # x (center of mass)
+                self.bubbles[cell_idx, 1] = self.density_centers[cell_idx, 1]  # y (center of mass)
+                self.bubbles[cell_idx, 2] = inner_r_norm  # radius (normalized)
+                self.bubbles[cell_idx, 3] = 1.0  # active
+
+        self.bubbles_enabled = True
+
+        # Count active bubbles
+        active_count = int(np.sum(self.bubbles[:, 3] > 0.5))
+        if active_count > 0:
+            print(f"  Initialized {active_count} bubbles (top {self.max_bubbles} densest cells) at inner_radius={inner_radius:.4f} (norm={inner_r_norm:.4f})")
+
+    def update_bubbles(self, dr: float, outer_radius: float):
+        """
+        Update bubble radii and deactivate those that hit the outer wall.
+
+        Args:
+            dr: Change in radius (in world space)
+            outer_radius: Current outer wall radius (in world space)
+        """
+        if not self.bubbles_enabled:
             return
 
-        # Get current positions
-        pos_cpu = self.get_positions_cpu()
+        # Normalize dr to [-1, 1] space
+        dr_norm = dr / outer_radius if outer_radius > 0 else dr
 
-        # Set bounds based on outer radius
-        bounds_min = np.array([-outer_radius, -outer_radius], dtype=np.float32)
-        bounds_max = np.array([outer_radius, outer_radius], dtype=np.float32)
+        for i in range(len(self.bubbles)):
+            if self.bubbles[i, 3] > 0.5:  # If active
+                # Grow bubble (in normalized space)
+                self.bubbles[i, 2] += dr_norm
 
-        # Update bubble system
-        self.adaptive_bubbles.update_density(pos_cpu, bounds_min, bounds_max)
+                # Deactivate if bubble hits outer wall (outer wall is at 1.0 in normalized space)
+                cx, cy, r = self.bubbles[i, 0], self.bubbles[i, 1], self.bubbles[i, 2]
+                dist_from_origin = np.sqrt(cx*cx + cy*cy)
+
+                if dist_from_origin + r >= 1.0:  # Outer wall at 1.0 in normalized space
+                    self.bubbles[i, 3] = 0.0  # Deactivate
 
     def get_bubble_data_for_renderer(self) -> Optional[np.ndarray]:
         """
@@ -704,19 +989,26 @@ class NBodyPhysicsEngine:
             Array of shape (n, 4) with (x, y, radius, active) for each bubble,
             or None if no bubbles
         """
-        if not self.use_adaptive_bubbles:
+        if not self.bubbles_enabled:
             return None
 
-        bubbles = self.adaptive_bubbles.get_bubble_info()
-        if len(bubbles) == 0:
+        # Return only active bubbles
+        active_mask = self.bubbles[:, 3] > 0.5
+        if not np.any(active_mask):
             return None
 
-        # Convert from (cx, cy, r, strength) to (x, y, radius, active)
-        bubble_array = np.zeros((len(bubbles), 4), dtype=np.float32)
-        for i, (cx, cy, r, strength) in enumerate(bubbles):
-            bubble_array[i] = [cx, cy, r, 1.0 if strength > 1.0 else 0.0]
+        return self.bubbles[active_mask].copy()
 
-        return bubble_array
+    def normalize_positions(self, norm_factor: float):
+        """
+        Normalize all positions by dividing by norm_factor.
+
+        This keeps the outer radius at 1.0 during the simulation.
+
+        Args:
+            norm_factor: Factor to divide positions by
+        """
+        self.pos /= norm_factor
 
     def get_final_tour(self) -> np.ndarray:
         """Get the final tour order based on angles."""
@@ -737,6 +1029,27 @@ class NBodyPhysicsEngine:
             cost += np.sqrt(np.sum(diff**2))
 
         return cost
+
+    def get_debug_data(self) -> dict:
+        """
+        Bundle all debug data for visualization.
+
+        Returns:
+            dict: Contains positions, velocities, accelerations, and distances
+        """
+        pos = self.get_positions_cpu()
+        vel = self.get_velocities_cpu()
+        acc = self.get_accelerations_cpu()
+
+        # Compute distance from origin
+        distances = np.linalg.norm(pos, axis=1)
+
+        return {
+            'positions': pos,
+            'velocities': vel,
+            'accelerations': acc,
+            'distances': distances,
+        }
 
 
 # Example usage

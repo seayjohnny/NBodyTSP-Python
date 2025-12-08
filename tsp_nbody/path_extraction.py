@@ -4,6 +4,7 @@ Path Extraction Module for N-Body TSP Simulator
 Extracts TSP paths from ring configurations using angular sorting.
 """
 
+import time
 import numpy as np
 from typing import Tuple, List
 
@@ -258,7 +259,7 @@ class PathExtractor:
         return analysis
 
 
-def nearest_neighbor_tsp(coords: np.ndarray, start_city: int = 0) -> np.ndarray:
+def nearest_neighbor_tsp(coords: np.ndarray, start_city: int = 0) -> Tuple[np.ndarray, float, float]:
     """
     Simple nearest neighbor heuristic for TSP (for comparison).
     
@@ -267,13 +268,14 @@ def nearest_neighbor_tsp(coords: np.ndarray, start_city: int = 0) -> np.ndarray:
         start_city: Index of starting city
         
     Returns:
-        Path as array of city indices
+        Path as array of city indices, cost as float, duration as float
     """
     n = len(coords)
     unvisited = set(range(n))
+
     path = [start_city]
     unvisited.remove(start_city)
-    
+    start_time = time.time()
     current = start_city
     
     while unvisited:
@@ -293,8 +295,42 @@ def nearest_neighbor_tsp(coords: np.ndarray, start_city: int = 0) -> np.ndarray:
         path.append(nearest)
         unvisited.remove(nearest)
         current = nearest
+    end_time = time.time()
+    duration = end_time - start_time
+    extractor = PathExtractor()
+    cost = extractor.calculate_path_cost(coords, path)
+    return np.array(path, dtype=np.int32), cost, duration
+
+
+def random_nearest_neighbor_tsp(coords: np.ndarray, num_samples: int = 1) -> Tuple[np.ndarray, float, float]:
+    """
+    Run the nearest neighbor TSP solver multiple times with random starts and return the best path found.
     
-    return np.array(path, dtype=np.int32)
+    Args:
+        coords: City coordinates (n, 2)
+        
+    Returns:
+        Tuple of (path, cost, duration)
+    """
+    
+    best_path = None
+    best_cost = float('inf')
+    best_duration = 0.0
+    
+    used_starts = set()
+    for _ in range(num_samples):
+        start_city = np.random.randint(len(coords))
+        while start_city in used_starts:
+            start_city = np.random.randint(len(coords))
+        used_starts.add(start_city)
+
+        path, cost, duration = nearest_neighbor_tsp(coords, start_city=start_city)
+        if cost < best_cost:
+            best_cost = cost
+            best_path = path
+            best_duration = duration
+
+    return best_path, best_cost, best_duration
 
 
 # Example usage
