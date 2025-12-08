@@ -37,8 +37,8 @@ class NBodyPhysicsOptions(TypedDict, total=False):
     lower_pressure_limit: float
     upper_pressure_limit: float
     use_pressure: bool
-    use_improved_walls: bool
-    use_adaptive_bubbles: bool
+    use_density_grid: bool
+    use_bubbles: bool
 
 default_nbody_options: NBodyPhysicsOptions = {
     'use_gpu': GPU_AVAILABLE,
@@ -58,8 +58,8 @@ default_nbody_options: NBodyPhysicsOptions = {
     "lower_pressure_limit": 1.0,
     "upper_pressure_limit": 10.0,
     'use_pressure': True,
-    'use_improved_walls': False,
-    'use_adaptive_bubbles': False,
+    'use_density_grid': False,
+    'use_bubbles': False,
 }
 
 
@@ -116,24 +116,16 @@ class NBodyPhysicsEngine:
         self.upper_pressure_limit = options.get('upper_pressure_limit', 1000)
         self.use_pressure = options.get('use_pressure', True)
 
-        # Advanced features
-        self.use_improved_walls = options.get('use_improved_walls', False)  # Recommended: prevents bleeding
-        self.use_adaptive_bubbles = options.get('use_adaptive_bubbles', False)  # Enable for dense datasets
-
-        # Initialize improved wall forces
-        if self.use_improved_walls:
-            self.improved_walls = ImprovedWallForces(
-                base_strength=self.WALL_STRENGTH, use_gpu=self.use_gpu
-            )
-        else:
-            self.improved_walls = None
+        # Bubble and density grid options
+        self.use_density_grid = options.get('use_density_grid', False)
+        self.use_bubbles = options.get('use_bubbles', False)  # Enable for dense datasets
 
         # Initialize adaptive bubbles
-        if self.use_adaptive_bubbles:
+        if self.use_bubbles:
             self.adaptive_bubbles = AdaptiveBubbles(
                 self.coords,
                 grid_size=10,
-                density_threshold=3.5,
+                density_threshold=0,
                 num_bubbles=3,
                 use_gpu=self.use_gpu,
             )
@@ -151,7 +143,7 @@ class NBodyPhysicsEngine:
 
         # Bubble management (like CUDA version)
         self.min_bin_density = 3  # Minimum density to spawn a bubble
-        self.max_bubbles = 5  # Maximum number of bubbles (spawn at top B densest cells)
+        self.max_bubbles = 3  # Maximum number of bubbles (spawn at top B densest cells)
         self.bubbles = np.zeros((self.grid_bins * self.grid_bins, 4), dtype=np.float32)  # (x, y, radius, active)
         self.bubbles_enabled = False  # Will be enabled when pressure is right
 
@@ -161,10 +153,6 @@ class NBodyPhysicsEngine:
         print(f"Physics engine initialized ({'GPU' if self.use_gpu else 'CPU'})")
         print(f"  Cities: {self.n_cities}")
         print(f"  Force mode: {self.force_mode}")
-        print(
-            f"  Advanced features: improved_walls={'ON' if self.use_improved_walls else 'OFF'}, "
-            f"adaptive_bubbles={'ON' if self.use_adaptive_bubbles else 'OFF'}"
-        )
         print("\n  N-Body parameters")
         print("-" * 40)
 
@@ -464,12 +452,16 @@ class NBodyPhysicsEngine:
         # Accelerations start at zero
         self.acc = self.xp.zeros_like(self.pos)
 
-        # Move any cities at exact origin slightly off center
+        # Move all cities at least a small distance away from origin to avoid singularities
         radii = self.xp.sqrt(self.pos[:, 0] ** 2 + self.pos[:, 1] ** 2)
         too_close = radii < 0.001
         if self.xp.any(too_close):
             self.pos[too_close, 0] = 0.001
             self.pos[too_close, 1] = 0.001
+
+        # Add a tiny perturbation to avoid exact overlaps
+        # perturbation = 1e-5 * self.xp.random.randn(self.n_cities, 2).astype(self.xp.float32)
+        # self.pos += perturbation
 
         print("Physics initialized: positions, velocities set")
 
@@ -604,7 +596,7 @@ class NBodyPhysicsEngine:
         blocks = (self.n_cities + threads_per_block - 1) // threads_per_block
 
         # Use reduced wall strength if improved walls are enabled
-        wall_strength = 0.0 if self.use_improved_walls else self.WALL_STRENGTH
+        wall_strength = self.WALL_STRENGTH
 
         if self.force_mode == "smooth":
             # Smooth Lennard-Jones kernel
@@ -652,22 +644,6 @@ class NBodyPhysicsEngine:
                     cp.float32(self.MASS),
                 ),
             )
-
-        # # Add improved wall forces if enabled
-        # if self.use_improved_walls:
-        #     wall_force = self.improved_walls.compute_forces(
-        #         self.pos, inner_radius, outer_radius
-        #     )
-        #     self.acc += wall_force / self.MASS
-
-        # # Add adaptive bubble forces if enabled
-        # if self.use_adaptive_bubbles:
-        #     bubble_force = self.adaptive_bubbles.compute_forces(self.pos)
-        #     self.acc += bubble_force / self.MASS
-
-        # Update velocities and positions
-        # self.pos += self.vel * self.DT
-        # self.vel += self.acc * self.DT
 
     def integrate_step_tsp_cpu(self, inner_radius: float, outer_radius: float):
         """Perform TSP integration using CPU."""
@@ -727,16 +703,10 @@ class NBodyPhysicsEngine:
 
                     force[i] += force_mag * diff / d
 
-        # Wall forces (improved or standard)
-        if self.use_improved_walls:
-            force += self.improved_walls.compute_forces(
-                self.pos, inner_radius, outer_radius
-            )
-        else:
-            force += self.compute_wall_forces_cpu(inner_radius, outer_radius)
+        force += self.compute_wall_forces_cpu(inner_radius, outer_radius)
 
         # Adaptive bubble forces
-        if self.use_adaptive_bubbles:
+        if self.use_bubbles:
             force += self.adaptive_bubbles.compute_forces(self.pos)
 
         # Damping
@@ -902,6 +872,9 @@ class NBodyPhysicsEngine:
         Args:
             outer_radius: Current outer wall radius for normalization
         """
+        if not self.use_density_grid:
+            return
+
         if self.use_gpu:
             self.compute_density_grid_gpu(outer_radius)
         else:
@@ -914,45 +887,70 @@ class NBodyPhysicsEngine:
         Returns:
             Array of density values for each grid cell
         """
+        if not self.use_density_grid:
+            return None
+
         return self.density_grid.copy()
 
-    def initialize_bubbles(self, inner_radius: float, outer_radius: float):
+    def initialize_bubbles(self, inner_radius: float, outer_radius: float,
+                          manual_positions: Optional[list] = None):
         """
-        Initialize bubbles at the top B most dense grid cells (CUDA version logic).
+        Initialize bubbles at manual positions or at the top B most dense grid cells.
 
         Args:
             inner_radius: Starting radius for bubbles (in world space)
             outer_radius: Current outer radius (for normalization)
+            manual_positions: Optional list of (x, y) tuples for manual bubble placement
         """
+        if not self.use_bubbles:
+            return
+
+
         # Reset all bubbles
         self.bubbles[:] = 0.0
 
         # Normalize inner radius to [-1, 1] space
         inner_r_norm = inner_radius / outer_radius if outer_radius > 0 else inner_radius
 
-        # Find cells that meet minimum density threshold
-        dense_cells = np.where(self.density_grid >= self.min_bin_density)[0]
+        # If manual positions provided, use them instead of density-based placement
+        if manual_positions is not None and len(manual_positions) > 0:
+            print(f"  Initializing {len(manual_positions)} manual bubbles at inner_radius={inner_radius:.4f} (norm={inner_r_norm:.4f})")
 
-        if len(dense_cells) > 0:
-            # Get densities of those cells
-            dense_cell_densities = self.density_grid[dense_cells]
+            # Place bubbles at manual positions (already in normalized [-1, 1] space)
+            for i, (x, y) in enumerate(manual_positions):
+                if i >= len(self.bubbles):
+                    print(f"  Warning: Too many manual bubbles ({len(manual_positions)}), only using first {len(self.bubbles)}")
+                    break
 
-            # Sort by density (descending) and take top MAX_BUBBLES
-            sorted_indices = np.argsort(dense_cell_densities)[::-1]
-            top_cells = dense_cells[sorted_indices[:self.max_bubbles]]
+                self.bubbles[i, 0] = x  # x position (normalized)
+                self.bubbles[i, 1] = y  # y position (normalized)
+                self.bubbles[i, 2] = inner_r_norm  # radius (normalized)
+                self.bubbles[i, 3] = 1.0  # active
+        else:
+            # Use density-based placement (original logic)
+            # Find cells that meet minimum density threshold
+            dense_cells = np.where(self.density_grid >= self.min_bin_density)[0]
 
-            # Create bubbles at top B densest cells
-            for cell_idx in top_cells:
-                self.bubbles[cell_idx, 0] = self.density_centers[cell_idx, 0]  # x (center of mass)
-                self.bubbles[cell_idx, 1] = self.density_centers[cell_idx, 1]  # y (center of mass)
-                self.bubbles[cell_idx, 2] = inner_r_norm  # radius (normalized)
-                self.bubbles[cell_idx, 3] = 1.0  # active
+            if len(dense_cells) > 0:
+                # Get densities of those cells
+                dense_cell_densities = self.density_grid[dense_cells]
+
+                # Sort by density (descending) and take top MAX_BUBBLES
+                sorted_indices = np.argsort(dense_cell_densities)[::-1]
+                top_cells = dense_cells[sorted_indices[:self.max_bubbles]]
+
+                # Create bubbles at top B densest cells
+                for cell_idx in top_cells:
+                    self.bubbles[cell_idx, 0] = self.density_centers[cell_idx, 0]  # x (center of mass)
+                    self.bubbles[cell_idx, 1] = self.density_centers[cell_idx, 1]  # y (center of mass)
+                    self.bubbles[cell_idx, 2] = inner_r_norm  # radius (normalized)
+                    self.bubbles[cell_idx, 3] = 1.0  # active
 
         self.bubbles_enabled = True
 
         # Count active bubbles
         active_count = int(np.sum(self.bubbles[:, 3] > 0.5))
-        if active_count > 0:
+        if active_count > 0 and (manual_positions is None or len(manual_positions) == 0):
             print(f"  Initialized {active_count} bubbles (top {self.max_bubbles} densest cells) at inner_radius={inner_radius:.4f} (norm={inner_r_norm:.4f})")
 
     def update_bubbles(self, dr: float, outer_radius: float):
@@ -963,6 +961,9 @@ class NBodyPhysicsEngine:
             dr: Change in radius (in world space)
             outer_radius: Current outer wall radius (in world space)
         """
+        if not self.use_bubbles:
+            return
+
         if not self.bubbles_enabled:
             return
 
@@ -989,6 +990,9 @@ class NBodyPhysicsEngine:
             Array of shape (n, 4) with (x, y, radius, active) for each bubble,
             or None if no bubbles
         """
+        if not self.use_bubbles:
+            return None
+
         if not self.bubbles_enabled:
             return None
 

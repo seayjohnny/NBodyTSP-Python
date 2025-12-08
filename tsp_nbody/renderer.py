@@ -10,7 +10,7 @@ from typing import Optional, Tuple, TypedDict, TypeAlias
 import sys
 
 try:
-    from OpenGL.GL import *  
+    from OpenGL.GL import *
     from OpenGL.GLU import *
     import pygame
     from pygame.locals import *
@@ -18,6 +18,13 @@ try:
 except ImportError:
     print("Warning: OpenGL/Pygame not available. Rendering disabled.")
     OPENGL_AVAILABLE = False
+
+try:
+    import cv2
+    CV2_AVAILABLE = True
+except ImportError:
+    print("Warning: OpenCV not available. Video recording disabled.")
+    CV2_AVAILABLE = False
 
 try:
     import win32gui
@@ -35,6 +42,10 @@ class RendererOptions(TypedDict, total=False):
     path_width: float
     wall_width: float
     padding: float  # Padding as fraction of view (e.g., 0.1 = 10%)
+    show_grid: bool
+    show_density: bool
+    show_bubbles: bool
+    use_random_city_colors: bool
     color_background: ColorType
     color_city: ColorType
     color_path: ColorType
@@ -44,6 +55,8 @@ class RendererOptions(TypedDict, total=False):
     color_bubble: ColorType
     color_density: ColorType
     color_text: ColorType
+    record_video: bool
+    video_fps: int
 
 
 default_renderer_options: RendererOptions = {
@@ -53,6 +66,10 @@ default_renderer_options: RendererOptions = {
     "path_width": 2.0,
     "wall_width": 2.0,
     "padding": 0.1,  # 10% padding around edges
+    "show_grid": False,
+    "show_density": False,
+    "show_bubbles": False,
+    "use_random_city_colors": False,
     "color_background": (0.9, 0.9, 1.0),
     "color_city": (0.2, 0.0, 1.0),
     "color_path": (0.0, 0.5, 0.0),
@@ -62,6 +79,8 @@ default_renderer_options: RendererOptions = {
     "color_bubble": (0.2, 0.8, 1.0),
     "color_density": (0.5, 0.5, 0.5),
     "color_text": (1.0, 1.0, 1.0),
+    "record_video": False,
+    "video_fps": 30,
 }
 
 
@@ -84,12 +103,20 @@ class TSPRenderer:
         self.font = None
         self.is_initialized = False
         self.is_paused = False
+        self.bubble_placement_mode = False
+        self.manual_bubbles = []  # List of (x, y) positions in normalized coordinates
 
         # Sizes
         self.city_size = options.get("city_size", 5.0)  # Point size for cities
         self.path_width = options.get("path_width", 2.0)  # Line width for paths
         self.wall_width = options.get("wall_width", 2.0)  # Line width for walls
         self.padding = options.get("padding", 0.1)  # Padding fraction
+
+        # Drawing options
+        self.show_grid = options.get("show_grid", False)
+        self.show_density = options.get("show_density", False)
+        self.show_bubbles = options.get("show_bubbles", False)
+        self.use_random_city_colors = options.get("use_random_city_colors", False)
 
         # Colors (RGB)
         self.color_background = options.get("color_background", (0.0, 0.0, 0.0))
@@ -101,6 +128,9 @@ class TSPRenderer:
         self.color_bubble = options.get("color_bubble", (0.2, 0.8, 1.0))
         self.color_density = options.get("color_density", (0.5, 0.5, 0.5))
         self.color_text = options.get("color_text", (1.0, 1.0, 1.0))
+
+        # Per-city colors (will be set when number of cities is known)
+        self.city_colors = None
 
         if not OPENGL_AVAILABLE:
             print("Renderer created but OpenGL not available")
@@ -179,34 +209,93 @@ class TSPRenderer:
         glMatrixMode(GL_MODELVIEW)
         glLoadIdentity()
 
+    def generate_random_colors(self, n_cities: int):
+        """
+        Generate random colors for each city.
+
+        Args:
+            n_cities: Number of cities (points) to generate colors for
+        """
+        # Generate random RGB colors for each city
+        # Use HSV color space for better color distribution
+        np.random.seed(42)  # Use a fixed seed for consistency
+
+        # Generate colors in HSV space and convert to RGB
+        colors = []
+        for i in range(n_cities):
+            hue = (i / n_cities) * 360  # Distribute hues evenly
+            saturation = 0.7 + np.random.rand() * 0.3  # High saturation (70-100%)
+            value = 0.7 + np.random.rand() * 0.3  # High value (70-100%)
+
+            # Convert HSV to RGB
+            c = value * saturation
+            x = c * (1 - abs((hue / 60) % 2 - 1))
+            m = value - c
+
+            if hue < 60:
+                r, g, b = c, x, 0
+            elif hue < 120:
+                r, g, b = x, c, 0
+            elif hue < 180:
+                r, g, b = 0, c, x
+            elif hue < 240:
+                r, g, b = 0, x, c
+            elif hue < 300:
+                r, g, b = x, 0, c
+            else:
+                r, g, b = c, 0, x
+
+            colors.append((r + m, g + m, b + m))
+
+        self.city_colors = np.array(colors, dtype=np.float32)
+        print(f"Generated {n_cities} random colors for cities")
+
     def clear(self):
         """Clear the display."""
         if not self.is_initialized:
             return
         glClear(GL_COLOR_BUFFER_BIT)
     
-    def draw_cities(self, positions: np.ndarray, size: float = 5.0, 
+    def draw_cities(self, positions: np.ndarray, size: float | None = None,
                    color: Optional[Tuple[float, float, float]] = None):
         """
         Draw cities as points.
-        
+
         Args:
             positions: City positions array (n, 2)
             size: Point size
-            color: RGB color tuple, or None for default
+            color: RGB color tuple, or None for default (uses per-city colors if available)
         """
         if not self.is_initialized:
             return
-        
-        color = color or self.color_city
-        
-        glPointSize(size)
-        glColor3f(*color)
-        
-        glBegin(GL_POINTS)
-        for pos in positions:
-            glVertex2f(pos[0], pos[1])
-        glEnd()
+
+        # Generate random colors if needed and not already generated
+        if self.use_random_city_colors and self.city_colors is None:
+            self.generate_random_colors(len(positions))
+
+        _size = size if size is not None else self.city_size
+
+        glPointSize(_size)
+
+        # Use per-city colors if available and no override color specified
+        if self.city_colors is not None and self.use_random_city_colors:
+            glBegin(GL_POINTS)
+            for i, pos in enumerate(positions):
+                if i < len(self.city_colors):
+                    glColor3f(*self.city_colors[i])
+                else:
+                    glColor3f(*self.color_city)
+                glVertex2f(pos[0], pos[1])
+            glEnd()
+        else:
+            # Use single color for all points
+            color = color or self.color_city
+            glColor3f(*color)
+
+            glBegin(GL_POINTS)
+            for pos in positions:
+                glVertex2f(pos[0], pos[1])
+            glEnd()
     
     def draw_circle(self, center: Tuple[float, float], radius: float, 
                    segments: int = 100, color: Optional[Tuple[float, float, float]] = None,
@@ -241,7 +330,8 @@ class TSPRenderer:
         glEnd()
     
     def draw_walls(self, inner_radius: float, outer_radius: float,
-                  inner_direction: int, outer_direction: int, width: float = 2.0):
+                  inner_direction: int, outer_direction: int,
+                  width: float | None = None):
         """
         Draw inner and outer circular walls with color-coded directions.
         
@@ -254,6 +344,8 @@ class TSPRenderer:
         if not self.is_initialized:
             return
         
+        _width = width if width is not None else self.wall_width
+
         # Color code based on direction
         def get_color(direction):
             if direction < 0:
@@ -266,14 +358,14 @@ class TSPRenderer:
         # Draw inner wall
         if inner_radius > 0.001:
             inner_color = get_color(inner_direction)
-            self.draw_circle((0, 0), inner_radius, color=inner_color, width=width)
+            self.draw_circle((0, 0), inner_radius, color=inner_color, width=_width)
         
         # Draw outer wall
         outer_color = get_color(outer_direction)
         self.draw_circle((0, 0), outer_radius, color=outer_color, width=width)
     
     def draw_path(self, coords: np.ndarray, path: np.ndarray,
-                 width: float = 3.0, color: Optional[Tuple[float, float, float]] = None):
+                 width: float | None = None, color: Optional[Tuple[float, float, float]] = None):
         """
         Draw TSP path connecting cities.
         
@@ -287,8 +379,9 @@ class TSPRenderer:
             return
         
         color = color or self.color_path
-        
-        glLineWidth(width)
+        _width = width if width is not None else self.path_width
+
+        glLineWidth(_width)
         glColor3f(*color)
         
         glBegin(GL_LINE_LOOP)
@@ -304,7 +397,7 @@ class TSPRenderer:
             bubbles: Array of shape (n, 4) with (x, y, radius, active)
             alpha: Transparency (0-1)
         """
-        if not self.is_initialized or bubbles is None or len(bubbles) == 0:
+        if not self.is_initialized or not self.show_bubbles or bubbles is None or len(bubbles) == 0:
             return
 
         for bubble in bubbles:
@@ -332,8 +425,7 @@ class TSPRenderer:
                 glEnd()
     
     def draw_density_grid(self, density: Optional[np.ndarray],
-                         bins: int, max_density: Optional[float] = None,
-                         draw_grid_lines: bool = True):
+                         bins: int, max_density: Optional[float] = None):
         """
         Draw density heatmap as colored rectangles with grid lines.
 
@@ -343,7 +435,7 @@ class TSPRenderer:
             max_density: Maximum density for color scaling
             draw_grid_lines: Whether to draw grid lines
         """
-        if not self.is_initialized:
+        if not self.is_initialized or (not self.show_density and not self.show_grid):
             return
 
         min_x, min_y = -1.0, -1.0
@@ -351,7 +443,7 @@ class TSPRenderer:
         cell_height = 2.0 / bins
 
         # Draw colored rectangles for density (if data provided)
-        if density is not None and len(density) > 0:
+        if density is not None and len(density) > 0 and self.show_density:
             if max_density is None:
                 max_density = np.max(density) if len(density) > 0 else 1.0
                 # Ensure we don't divide by zero
@@ -370,9 +462,12 @@ class TSPRenderer:
                         # Using sqrt scaling to make differences more visible
                         intensity = min(np.sqrt(d / max_density), 1.0)
 
-                        # Use a color gradient: orange-red for density
+                        # Use a color gradient: we use color density as base
                         # More intense = more particles
-                        glColor4f(intensity, intensity * 0.5, 0.0, 0.4)
+                        r = self.color_density[0] * intensity
+                        g = self.color_density[1] * intensity
+                        b = self.color_density[2] * intensity
+                        glColor4f(r, g, b, 0.6)
 
                         # Draw filled rectangle
                         # NOTE: Grid y=0 is at the TOP, so we flip when drawing
@@ -387,7 +482,7 @@ class TSPRenderer:
                         glEnd()
 
         # Always draw grid lines
-        if draw_grid_lines:
+        if self.show_grid:
             glLineWidth(1.0)
             glColor4f(0.3, 0.3, 0.3, 0.5)  # Semi-transparent gray
 
@@ -537,6 +632,63 @@ class TSPRenderer:
         glPopMatrix()
         glMatrixMode(GL_MODELVIEW)
         glPopAttrib()
+
+    def draw_bubble_placement_indicator(self):
+        """Draw bubble placement mode instructions."""
+        if not self.is_initialized or self.font is None or not self.bubble_placement_mode:
+            return
+
+        # Draw instructions
+        instructions = [
+            "BUBBLE PLACEMENT MODE",
+            "Left Click: Place Bubble",
+            "Right Click: Remove Bubble",
+            f"Bubbles: {len(self.manual_bubbles)}",
+            "",
+            "SPACE: Start with manual bubbles",
+            "D: Use dynamic bubbles instead"
+        ]
+
+        padding = 20
+        line_height = 25
+
+        for i, text in enumerate(instructions):
+            if text == "":
+                continue
+            color = (0, 255, 255) if i == 0 else (255, 255, 255)  # Cyan for title
+            self.draw_text(text, (padding, padding + i * line_height), color)
+
+    def draw_manual_bubbles(self, initial_radius: float = 0.15):
+        """
+        Draw manually placed bubbles during placement mode.
+
+        Args:
+            initial_radius: Initial radius for bubbles
+        """
+        if not self.is_initialized or not self.bubble_placement_mode:
+            return
+
+        for bx, by in self.manual_bubbles:
+            # Draw filled circle with transparency
+            glColor4f(*self.color_bubble, 0.3)
+            glBegin(GL_POLYGON)
+            for i in range(50):
+                theta = 2.0 * np.pi * i / 50
+                x = bx + initial_radius * np.cos(theta)
+                y = by + initial_radius * np.sin(theta)
+                glVertex2f(x, y)
+            glEnd()
+
+            # Draw outline (opaque)
+            glColor3f(*self.color_bubble)
+            glLineWidth(2.0)
+            glBegin(GL_LINE_LOOP)
+            for i in range(50):
+                theta = 2.0 * np.pi * i / 50
+                x = bx + initial_radius * np.cos(theta)
+                y = by + initial_radius * np.sin(theta)
+                glVertex2f(x, y)
+            glEnd()
     
     def draw_frame_complete(self, positions: np.ndarray, inner_radius: float,
                            outer_radius: float, inner_dir: int, outer_dir: int,
@@ -594,6 +746,44 @@ class TSPRenderer:
         if not self.is_initialized:
             return
         pygame.display.flip()
+
+    def capture_frame(self, from_back_buffer: bool = False) -> Optional[np.ndarray]:
+        """
+        Capture the current framebuffer as a numpy array.
+
+        Args:
+            from_back_buffer: If True, read from back buffer (before swap),
+                            if False, read from front buffer (after swap)
+
+        Returns:
+            RGB image array of shape (height, width, 3) or None if capture fails
+        """
+        if not self.is_initialized:
+            return None
+
+        try:
+            # Select which buffer to read from
+            if from_back_buffer:
+                glReadBuffer(GL_BACK)
+            else:
+                glReadBuffer(GL_FRONT)
+
+            # Read pixels from the selected buffer
+            width, height = self.window_size
+            glPixelStorei(GL_PACK_ALIGNMENT, 1)
+            data = glReadPixels(0, 0, width, height, GL_RGB, GL_UNSIGNED_BYTE)
+
+            # Convert to numpy array
+            image = np.frombuffer(data, dtype=np.uint8)
+            image = image.reshape(height, width, 3)
+
+            # Flip vertically (OpenGL has origin at bottom-left, images at top-left)
+            image = np.flipud(image)
+
+            return image
+        except Exception as e:
+            print(f"Warning: Failed to capture frame: {e}")
+            return None
     
     def handle_events(self) -> bool:
         """
@@ -612,8 +802,34 @@ class TSPRenderer:
                 if event.key == K_ESCAPE:
                     return False
             if event.type == MOUSEBUTTONDOWN:
-                if event.button == 1:  # Left mouse button
-                    self.toggle_pause()
+                if self.bubble_placement_mode:
+                    # Bubble placement mode: left click adds, right click removes
+                    mouse_x, mouse_y = pygame.mouse.get_pos()
+                    world_x, world_y = self.screen_to_world(mouse_x, mouse_y)
+
+                    if event.button == 1:  # Left mouse button - add bubble
+                        self.manual_bubbles.append((world_x, world_y))
+                        print(f"Bubble placed at ({world_x:.2f}, {world_y:.2f}). Total: {len(self.manual_bubbles)}")
+                    elif event.button == 3:  # Right mouse button - remove nearest bubble
+                        if self.manual_bubbles:
+                            # Find and remove nearest bubble
+                            min_dist = float('inf')
+                            nearest_idx = -1
+                            for i, (bx, by) in enumerate(self.manual_bubbles):
+                                dist = np.sqrt((bx - world_x)**2 + (by - world_y)**2)
+                                if dist < min_dist:
+                                    min_dist = dist
+                                    nearest_idx = i
+
+                            if nearest_idx >= 0 and min_dist < 0.2:  # Only remove if close enough
+                                removed = self.manual_bubbles.pop(nearest_idx)
+                                print(f"Bubble removed at ({removed[0]:.2f}, {removed[1]:.2f}). Total: {len(self.manual_bubbles)}")
+                            else:
+                                print("No bubble close enough to remove")
+                else:
+                    # Normal mode: left click toggles pause
+                    if event.button == 1:  # Left mouse button
+                        self.toggle_pause()
 
         return True
 
@@ -622,21 +838,78 @@ class TSPRenderer:
         self.is_paused = not self.is_paused
         status = "PAUSED" if self.is_paused else "RESUMED"
         print(f"Simulation {status}")
+
+    def screen_to_world(self, screen_x: int, screen_y: int) -> Tuple[float, float]:
+        """
+        Convert screen coordinates to world coordinates.
+
+        Args:
+            screen_x: X coordinate in screen space (pixels from left)
+            screen_y: Y coordinate in screen space (pixels from top)
+
+        Returns:
+            Tuple of (world_x, world_y) in normalized simulation space [-1, 1]
+        """
+        # Convert screen coordinates to normalized device coordinates
+        # Screen origin is top-left, OpenGL origin is bottom-left
+        ndc_x = (2.0 * screen_x / self.window_size[0]) - 1.0
+        ndc_y = 1.0 - (2.0 * screen_y / self.window_size[1])  # Flip Y axis
+
+        # Account for padding in the projection
+        view_limit = 1.0 + self.padding
+        world_x = ndc_x * view_limit
+        world_y = ndc_y * view_limit
+
+        return (world_x, world_y)
     
     def wait_for_key(self):
         """Wait for user to press a key."""
         if not self.is_initialized:
             return
-        
-        print("Press any key to continue...")
+
+        if self.bubble_placement_mode:
+            print("Press any key to start simulation...")
+        else:
+            print("Press any key to continue...")
+
         waiting = True
         while waiting:
+            # Process events to handle mouse clicks during placement mode
             for event in pygame.event.get():
                 if event.type == QUIT:
                     pygame.quit()
                     sys.exit()
                 if event.type == KEYDOWN:
+                    # Exit bubble placement mode when key is pressed
+                    if self.bubble_placement_mode:
+                        self.bubble_placement_mode = False
+                        print(f"Starting simulation with {len(self.manual_bubbles)} manual bubbles")
                     waiting = False
+                if event.type == MOUSEBUTTONDOWN and self.bubble_placement_mode:
+                    # Handle bubble placement/removal during wait
+                    mouse_x, mouse_y = pygame.mouse.get_pos()
+                    world_x, world_y = self.screen_to_world(mouse_x, mouse_y)
+
+                    if event.button == 1:  # Left mouse button - add bubble
+                        self.manual_bubbles.append((world_x, world_y))
+                        print(f"Bubble placed at ({world_x:.2f}, {world_y:.2f}). Total: {len(self.manual_bubbles)}")
+                    elif event.button == 3:  # Right mouse button - remove nearest bubble
+                        if self.manual_bubbles:
+                            # Find and remove nearest bubble
+                            min_dist = float('inf')
+                            nearest_idx = -1
+                            for i, (bx, by) in enumerate(self.manual_bubbles):
+                                dist = np.sqrt((bx - world_x)**2 + (by - world_y)**2)
+                                if dist < min_dist:
+                                    min_dist = dist
+                                    nearest_idx = i
+
+                            if nearest_idx >= 0 and min_dist < 0.2:  # Only remove if close enough
+                                removed = self.manual_bubbles.pop(nearest_idx)
+                                print(f"Bubble removed at ({removed[0]:.2f}, {removed[1]:.2f}). Total: {len(self.manual_bubbles)}")
+                            else:
+                                print("No bubble close enough to remove")
+
             pygame.time.wait(10)
 
     def wait_for_unpause(self):

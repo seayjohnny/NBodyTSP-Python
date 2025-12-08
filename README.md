@@ -204,6 +204,38 @@ simulator = TSPNBodySimulator('coords.txt', params)
 - **grav_const**: Strength of gravitational attraction between particles
 - **use_bubbles**: Enable the bubble method for non-uniform city distributions
 
+### Video Recording
+
+You can record simulations as MP4 videos (ideal for YouTube):
+
+```python
+params = {
+    'draw': True,
+    'record_video': True,          # Enable video recording
+    'video_output_path': None,     # Auto-generate filename if None
+    'video_fps': 30,               # Frame rate (30 recommended for YouTube)
+    'video_record_frequency': 1,   # Record every N frames (1 = every frame)
+}
+
+simulator = TSPNBodySimulator('datasets/bay29/coords.txt', params)
+```
+
+**Video Recording Parameters:**
+
+- **record_video**: Enable/disable video recording
+- **video_output_path**: Output file path (auto-generated in `videos/` folder if None)
+- **video_fps**: Video frame rate (default: 30 FPS, good for YouTube)
+- **video_record_frequency**: Record every Nth rendered frame (1 = every frame, higher = faster processing)
+
+Videos are saved as MP4 files using the H.264 codec, which is optimized for YouTube uploads. The final path visualization is held for 2 seconds at the end of each video.
+
+**Requirements:** Video recording requires OpenCV to be installed:
+```bash
+uv pip install opencv-python
+# or
+pip install opencv-python
+```
+
 ## Methods
 
 ### Pressure Method

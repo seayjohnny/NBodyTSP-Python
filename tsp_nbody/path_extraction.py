@@ -318,7 +318,8 @@ def random_nearest_neighbor_tsp(coords: np.ndarray, num_samples: int = 1) -> Tup
     best_duration = 0.0
     
     used_starts = set()
-    for _ in range(num_samples):
+    max_samples = min(num_samples, len(coords))
+    for _ in range(max_samples):
         start_city = np.random.randint(len(coords))
         while start_city in used_starts:
             start_city = np.random.randint(len(coords))

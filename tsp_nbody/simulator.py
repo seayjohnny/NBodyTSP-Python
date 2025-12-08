@@ -9,14 +9,71 @@ import logging
 import numpy as np
 
 from pathlib import Path
-from typing import Optional, Tuple, Dict
+from typing import Optional, Tuple, Dict, TypedDict
+from datetime import datetime
 
+try:
+    import cv2
+    CV2_AVAILABLE = True
+except ImportError:
+    CV2_AVAILABLE = False
+
+try:
+    import pygame
+except ImportError:
+    pygame = None
 
 # Import our modules
 from tsp_nbody.dataio import TSPDataLoader, load_optimal_path, load_optimal_cost
 from tsp_nbody.physics_engine import NBodyPhysicsEngine, NBodyPhysicsOptions, default_nbody_options
 from tsp_nbody.path_extraction import PathExtractor, random_nearest_neighbor_tsp
 from tsp_nbody.renderer import TSPRenderer, RendererOptions, default_renderer_options, OPENGL_AVAILABLE
+from tsp_nbody.best_results import att48, ch150
+
+
+class SimulatorOptions(TypedDict, total=False):
+    """Typed dictionary for simulator options."""
+    # Common options
+    steps_per_wall_move: int
+    use_gpu: bool
+    use_pressure: bool
+    use_density_grid: bool
+    use_bubbles: bool  # Requires density grid to be enabled
+
+    # Rendering options
+    draw: bool
+    render_frequency: int
+    pause_initial: bool
+    step_mode: str  # "continuous" or "step"
+
+    # Video recording options
+    record_video: bool
+    video_output_path: Optional[str]
+    video_fps: int
+    video_record_frequency: int  # Record every Nth frame
+
+    # Debug options
+    debug_window: bool
+    debug_update_frequency: int
+
+
+default_simulator_options: SimulatorOptions = {
+    "steps_per_wall_move": 1,
+    "use_gpu": True,
+    "use_pressure": False,
+    "use_density_grid": False,
+    "use_bubbles": False,
+    "draw": True,
+    "render_frequency": 10,
+    "pause_initial": True,
+    "step_mode": "continuous",
+    "record_video": False,
+    "video_output_path": None,
+    "video_fps": 30,
+    "video_record_frequency": 1,  # Record every frame
+    "debug_window": False,
+    "debug_update_frequency": 10,
+}
 
 
 class TSPNBodySimulator:
@@ -25,7 +82,7 @@ class TSPNBodySimulator:
     def __init__(
         self,
         coord_file: str,
-        params: Optional[Dict] = None,
+        options: Optional[SimulatorOptions] = None,
         nbody_options: Optional[NBodyPhysicsOptions] = None,
         renderer_options: Optional[RendererOptions] = None,
     ):
@@ -37,17 +94,27 @@ class TSPNBodySimulator:
             params: Optional parameter dictionary
         """
         self.coord_file = Path(coord_file)
-        self.params = self.default_params()
-        if params is not None:
-            self.params.update(params)
 
-        self.nbody_options = default_nbody_options.copy()
-        if nbody_options is not None:
-            self.nbody_options.update(nbody_options)
+        # N-body and rendering parameters
+        self.nbody_options: NBodyPhysicsEngine = default_nbody_options.copy()
+        self.nbody_options.update(nbody_options or {})
 
-        self.renderer_options = default_renderer_options.copy()
-        if renderer_options is not None:
-            self.renderer_options.update(renderer_options)
+        self.renderer_options: RendererOptions = default_renderer_options.copy()
+        self.renderer_options.update(renderer_options or {})
+        
+
+        self.options = default_simulator_options.copy()
+        if options is not None:
+            self.options.update(options)
+
+            self.nbody_options["use_gpu"] = self.options.get("use_gpu", True)
+            self.nbody_options["use_pressure"] = self.options.get("use_pressure", False)
+            self.nbody_options["use_density_grid"] = self.options.get("use_density_grid", False)
+            self.nbody_options["use_bubbles"] = self.options.get("use_bubbles", False)
+
+            self.renderer_options["show_grid"] = self.options.get("use_density_grid", False)
+            self.renderer_options["show_density"] = self.options.get("use_density_grid", False)
+            self.renderer_options["show_bubbles"] = self.options.get("use_bubbles", False)
 
         # Components
         self.data_loader = TSPDataLoader(str(coord_file))
@@ -55,6 +122,7 @@ class TSPNBodySimulator:
         self.path_extractor = PathExtractor()
         self.renderer = None
         self.debug_window = None
+        self.video_writer = None
 
         # Simulation state
         self.is_initialized = False
@@ -76,28 +144,11 @@ class TSPNBodySimulator:
         self.final_cost = 0.0
         self.optimal_cost = None
 
+        # Bubble mode selection
+        self.use_dynamic_bubbles = False
+
         print(f"Simulator created for: {self.coord_file.name}")
 
-
-    def default_params(self) -> Dict:
-        """Get default simulation parameters."""
-        return {
-            # Integration
-            "steps_per_wall_move": 1,  # Match C++ inner while loop (1.0 / 0.01 = 100)
-
-            # Rendering
-            "draw": True,
-            "render_frequency": 10,  # Render every N physics steps
-            "pause_initial": True,
-            "step_mode": "continuous",  # "continuous" or "step"
-
-            # Debug window
-            "debug_window": False,  # Enable separate debug window
-            "debug_update_frequency": 10,  # Update every N render frames
-
-            # GPU
-            "use_gpu": True,
-        }
 
     def initialize(self) -> bool:
         """
@@ -140,18 +191,22 @@ class TSPNBodySimulator:
 
             # Initialize renderer if drawing enabled
             print("\n[3/4] Initializing renderer...")
-            if self.params["draw"] and OPENGL_AVAILABLE:
+            if self.options["draw"] and OPENGL_AVAILABLE:
                 self.renderer = TSPRenderer(options=self.renderer_options)
                 if not self.renderer.initialize():
                     print(
                         "Warning: Renderer initialization failed, continuing without visualization"
                     )
                     self.renderer = None
+                else:
+                    # Initialize video recording if enabled
+                    if self.options.get("record_video", False):
+                        self._initialize_video_writer()
             else:
                 print("Rendering disabled or OpenGL not available")
 
             # Initialize debug window if enabled
-            if self.params.get("debug_window", False):
+            if self.options.get("debug_window", False):
                 try:
                     from tsp_nbody.debug_window import DebugWindow
                     self.debug_window = DebugWindow(
@@ -185,6 +240,49 @@ class TSPNBodySimulator:
 
             traceback.print_exc()
             return False
+
+    def _initialize_video_writer(self):
+        """Initialize video writer for recording simulation."""
+        if not CV2_AVAILABLE:
+            print("Warning: OpenCV not available. Video recording disabled.")
+            self.options["record_video"] = False
+            return
+
+        if not self.renderer or not self.renderer.is_initialized:
+            print("Warning: Renderer not available. Video recording disabled.")
+            self.options["record_video"] = False
+            return
+
+        # Generate output path if not provided
+        if self.options.get("video_output_path") is None:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            dataset_name = self.coord_file.stem
+            output_dir = Path("videos")
+            output_dir.mkdir(exist_ok=True)
+            output_path = output_dir / f"{dataset_name}_{timestamp}.mp4"
+            self.options["video_output_path"] = str(output_path)
+
+        # Get video parameters
+        width, height = self.renderer.window_size
+        fps = self.options.get("video_fps", 30)
+        output_path = self.options["video_output_path"]
+
+        # Initialize VideoWriter with H.264 codec (best for YouTube)
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # Use mp4v for better compatibility
+        self.video_writer = cv2.VideoWriter(
+            output_path,
+            fourcc,
+            fps,
+            (width, height)
+        )
+
+        if not self.video_writer.isOpened():
+            print(f"Warning: Failed to open video writer for {output_path}")
+            self.video_writer = None
+            self.options["record_video"] = False
+        else:
+            print(f"Video recording initialized: {output_path}")
+            print(f"  Resolution: {width}x{height}, FPS: {fps}")
 
     def get_smallest_distance(self) -> float:
         """Calculate smallest inter-city distance."""
@@ -239,6 +337,78 @@ class TSPNBodySimulator:
         # self.inner_radius = max(0.0, self.inner_radius)
         # self.outer_radius = max(self.inner_radius + 0.001, self.outer_radius)
 
+    def _draw_frame_no_swap(self, positions: np.ndarray, inner_radius: float,
+                           outer_radius: float, inner_dir: int, outer_dir: int,
+                           bubbles: Optional[np.ndarray] = None,
+                           density_grid: Optional[np.ndarray] = None,
+                           grid_bins: int = 8,
+                           pressure: Optional[float] = None):
+        """
+        Draw a frame without swapping buffers (for video capture).
+
+        This is the same as renderer.draw_frame_complete but without the swap_buffers() call.
+        """
+        if not self.renderer or not self.renderer.is_initialized:
+            return
+
+        self.renderer.clear()
+
+        # Draw density grid
+        self.renderer.draw_density_grid(density_grid, grid_bins)
+
+        # Draw walls
+        self.renderer.draw_walls(inner_radius, outer_radius, inner_dir, outer_dir, width=self.renderer.wall_width)
+        if bubbles is not None:
+            self.renderer.draw_bubbles(bubbles)
+
+        # Draw cities
+        self.renderer.draw_cities(positions, size=self.renderer.city_size, color=self.renderer.color_city)
+
+        # Draw pressure overlay
+        if pressure is not None:
+            wall_gap = outer_radius - inner_radius
+            self.renderer.draw_pressure_overlay(pressure, wall_gap)
+
+        # Draw pause indicator if paused
+        self.renderer.draw_pause_indicator()
+
+    def render_frame_with_manual_bubbles(self):
+        """Render initial frame with manual bubble placement overlays."""
+        if not self.options["draw"]:
+            return
+
+        if self.renderer is None or not self.renderer.is_initialized:
+            return
+
+        # Get current positions from GPU
+        positions = self.physics_engine.get_positions_cpu()
+
+        # Normalize positions for rendering
+        if self.outer_radius > 0:
+            positions_normalized = positions / self.outer_radius
+            inner_r_normalized = self.inner_radius / self.outer_radius
+            outer_r_normalized = 1.0
+        else:
+            positions_normalized = positions
+            inner_r_normalized = self.inner_radius
+            outer_r_normalized = self.outer_radius
+
+        # Draw frame
+        self.renderer.clear()
+        self.renderer.draw_walls(inner_r_normalized, outer_r_normalized,
+                                self.inner_direction, self.outer_direction,
+                                width=self.renderer.wall_width)
+        self.renderer.draw_cities(positions_normalized, size=self.renderer.city_size,
+                                 color=self.renderer.color_city)
+
+        # Draw manual bubbles
+        self.renderer.draw_manual_bubbles()
+
+        # Draw bubble placement indicator
+        self.renderer.draw_bubble_placement_indicator()
+
+        self.renderer.swap_buffers()
+
     def render_frame(self, step: int = 0):
         """
         Render current simulation state.
@@ -246,17 +416,22 @@ class TSPNBodySimulator:
         Args:
             step: Current step number (for display)
         """
+        if not self.options["draw"]:
+            return
+
         if self.renderer is None or not self.renderer.is_initialized:
             return
 
         # Get current positions from GPU
         positions = self.physics_engine.get_positions_cpu()
 
-        # Update and get density grid (pass outer_radius for normalization)
+        # Update and get density grid (pass outer_radius for normalization), if available
+        # If density grid is not used, this will be a no-op
         self.physics_engine.update_density_grid(self.outer_radius)
         density_grid = self.physics_engine.get_density_grid_for_renderer()
 
         # Get bubble data if available
+        # If bubbles are not used, this will be a no-op
         bubbles = self.physics_engine.get_bubble_data_for_renderer()
 
         # Get current pressure
@@ -277,21 +452,47 @@ class TSPNBodySimulator:
             outer_r_normalized = self.outer_radius
             bubbles_normalized = bubbles
 
-        # Draw frame
-        self.renderer.draw_frame_complete(
-            positions_normalized,
-            inner_r_normalized,
-            outer_r_normalized,
-            self.inner_direction,
-            self.outer_direction,
-            bubbles=bubbles_normalized,
-            density_grid=density_grid,
-            grid_bins=self.physics_engine.grid_bins,
-            pressure=pressure,
-        )
+        # Draw frame (but don't swap buffers yet if recording video)
+        should_record = (self.options.get("record_video", False) and
+                        self.video_writer is not None and
+                        step % self.options.get("video_record_frequency", 1) == 0)
+
+        if should_record:
+            # Draw without swapping so we can capture the back buffer
+            self._draw_frame_no_swap(
+                positions_normalized,
+                inner_r_normalized,
+                outer_r_normalized,
+                self.inner_direction,
+                self.outer_direction,
+                bubbles=bubbles_normalized,
+                density_grid=density_grid,
+                grid_bins=self.physics_engine.grid_bins,
+                pressure=pressure,
+            )
+            # Capture frame from back buffer before swapping
+            frame = self.renderer.capture_frame(from_back_buffer=True)
+            if frame is not None:
+                frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                self.video_writer.write(frame_bgr)
+            # Now swap buffers
+            self.renderer.swap_buffers()
+        else:
+            # Normal drawing with swap
+            self.renderer.draw_frame_complete(
+                positions_normalized,
+                inner_r_normalized,
+                outer_r_normalized,
+                self.inner_direction,
+                self.outer_direction,
+                bubbles=bubbles_normalized,
+                density_grid=density_grid,
+                grid_bins=self.physics_engine.grid_bins,
+                pressure=pressure,
+            )
 
         # Update debug window if enabled
-        if self.debug_window and step % self.params.get("debug_update_frequency", 10) == 0:
+        if self.debug_window and step % self.options.get("debug_update_frequency", 10) == 0:
             debug_data = self.physics_engine.get_debug_data()
             debug_data['step'] = step
             self.debug_window.update(debug_data)
@@ -315,15 +516,89 @@ class TSPNBodySimulator:
         # Get DR (wall step size)
         dr = self.nbody_options["DR"]
 
-        stop_separation = self.get_smallest_distance() * 0.5
-        # dr = self.outer_radius / 1000.0
+        # stop_separation = self.get_smallest_distance() * 0.25
+        stop_separation = dr * 10.0 #Stop with a buffer gap to avoid singularities near the end
 
-        # Show initial configuration
-        if self.params["draw"] and self.renderer:
+        # Show initial configuration with bubble placement mode if bubbles enabled
+        if self.options["draw"] and self.renderer:
             print("\nShowing initial configuration...")
-            self.render_frame()
-            if self.params["pause_initial"]:
-                self.renderer.wait_for_key()
+
+            # Enable bubble placement mode if bubbles are enabled
+            if self.nbody_options["use_bubbles"]:
+                self.renderer.bubble_placement_mode = True
+                print("\n" + "=" * 60)
+                print("BUBBLE PLACEMENT MODE")
+                print("=" * 60)
+                print("Left Click: Place bubble spawn point")
+                print("Right Click: Remove nearest bubble")
+                print("Press SPACE to start with manual bubbles")
+                print("Press 'D' to use dynamic (density-based) bubbles instead")
+                print("=" * 60 + "\n")
+
+            # Render loop for bubble placement
+            waiting = self.options["pause_initial"]
+            use_dynamic_bubbles = False
+
+            while waiting:
+                # Render frame with manual bubbles
+                self.render_frame_with_manual_bubbles()
+
+                # Handle events
+                for event in pygame.event.get():
+                    if event.type == pygame.QUIT:
+                        print("\nSimulation interrupted by user")
+                        raise KeyboardInterrupt
+
+                    if event.type == pygame.KEYDOWN:
+                        if event.key == pygame.K_ESCAPE:
+                            print("\nSimulation interrupted by user")
+                            raise KeyboardInterrupt
+                        elif event.key == pygame.K_d:
+                            # Use dynamic bubbles instead
+                            print("Switching to dynamic (density-based) bubble placement")
+                            self.renderer.bubble_placement_mode = False
+                            self.renderer.manual_bubbles = []  # Clear manual bubbles
+                            use_dynamic_bubbles = True
+                            waiting = False
+                        elif event.key == pygame.K_SPACE or (not self.nbody_options["use_bubbles"]):
+                            # Start simulation with current bubbles
+                            print(f"Starting simulation with {len(self.renderer.manual_bubbles)} manual bubbles")
+                            self.renderer.bubble_placement_mode = False
+                            waiting = False
+
+                    if event.type == pygame.MOUSEBUTTONDOWN and self.renderer.bubble_placement_mode:
+                        # Handle bubble placement/removal
+                        mouse_x, mouse_y = pygame.mouse.get_pos()
+                        world_x, world_y = self.renderer.screen_to_world(mouse_x, mouse_y)
+
+                        if event.button == 1:  # Left mouse button - add bubble
+                            self.renderer.manual_bubbles.append((world_x, world_y))
+                            print(f"Bubble placed at ({world_x:.2f}, {world_y:.2f}). Total: {len(self.renderer.manual_bubbles)}")
+                        elif event.button == 3:  # Right mouse button - remove nearest bubble
+                            if self.renderer.manual_bubbles:
+                                # Find and remove nearest bubble
+                                min_dist = float('inf')
+                                nearest_idx = -1
+                                for i, (bx, by) in enumerate(self.renderer.manual_bubbles):
+                                    dist = np.sqrt((bx - world_x)**2 + (by - world_y)**2)
+                                    if dist < min_dist:
+                                        min_dist = dist
+                                        nearest_idx = i
+
+                                if nearest_idx >= 0 and min_dist < 0.2:  # Only remove if close enough
+                                    removed = self.renderer.manual_bubbles.pop(nearest_idx)
+                                    print(f"Bubble removed at ({removed[0]:.2f}, {removed[1]:.2f}). Total: {len(self.renderer.manual_bubbles)}")
+                                else:
+                                    print("No bubble close enough to remove")
+
+                pygame.time.wait(10)
+
+            # Store whether to use dynamic bubbles
+            self.use_dynamic_bubbles = use_dynamic_bubbles
+
+            if not self.options["pause_initial"]:
+                # If not pausing initially, just render once
+                self.render_frame()
 
         # Main simulation loop (matches C++ structure)
         print("\nRunning N-body extrusion...")
@@ -334,7 +609,7 @@ class TSPNBodySimulator:
 
         # Main loop: while inner < outer - DR
         while self.inner_radius + stop_separation < self.outer_radius:
-            if self.params["step_mode"] == "step":
+            if self.options["step_mode"] == "step":
                     self.renderer.wait_for_key()
 
             if self.renderer and self.renderer.is_paused:
@@ -342,7 +617,7 @@ class TSPNBodySimulator:
 
             self.step_walls(dr)
 
-            for _ in range(self.params["steps_per_wall_move"]):
+            for _ in range(self.options["steps_per_wall_move"]):
                 # Integrate one step
                 self.physics_engine.integrate_step(
                     self.inner_radius,
@@ -352,8 +627,8 @@ class TSPNBodySimulator:
 
                 # Render periodically
                 if (
-                    self.params["draw"]
-                    and draw_count % self.params["render_frequency"] == 0
+                    self.options["draw"]
+                    and draw_count % self.options["render_frequency"] == 0
                 ):
                     self.render_frame(total_steps)
 
@@ -368,15 +643,25 @@ class TSPNBodySimulator:
             # Update bubbles based on density grid
             # Check if we should create/update bubbles (when inner wall is expanding)
             if self.inner_direction > 0:
-                # Update density grid to find clusters
-                self.physics_engine.update_density_grid(self.outer_radius)
+                
+                if self.nbody_options["use_density_grid"]:
+                    # Update density grid to find clusters
+                    self.physics_engine.update_density_grid(self.outer_radius)
 
                 # Initialize bubbles if not already done
-                if not self.physics_engine.bubbles_enabled:
-                    self.physics_engine.initialize_bubbles(self.inner_radius, self.outer_radius)
+                if self.nbody_options["use_bubbles"] and self.nbody_options["use_density_grid"]:
+                    if not self.physics_engine.bubbles_enabled:
+                        # Get manual bubble positions from renderer if available and not using dynamic mode
+                        manual_positions = None
+                        if (not hasattr(self, 'use_dynamic_bubbles') or not self.use_dynamic_bubbles):
+                            if self.renderer and hasattr(self.renderer, 'manual_bubbles') and len(self.renderer.manual_bubbles) > 0:
+                                manual_positions = self.renderer.manual_bubbles
 
-                # Grow existing bubbles
-                self.physics_engine.update_bubbles(dr, self.outer_radius)
+                        self.physics_engine.initialize_bubbles(self.inner_radius, self.outer_radius,
+                                                              manual_positions=manual_positions)
+
+                    # Grow existing bubbles
+                    self.physics_engine.update_bubbles(dr, self.outer_radius)
 
             # Move walls after integration phase
             if self.nbody_options["use_pressure"]:
@@ -421,7 +706,7 @@ class TSPNBodySimulator:
         )
 
         # Display final path
-        if self.params["draw"] and self.renderer:
+        if self.options["draw"] and self.renderer:
             print("\nShowing final path...")
             positions_normalized = final_positions / self.outer_radius
             coords_normalized = self.coords / self.outer_radius
@@ -430,15 +715,23 @@ class TSPNBodySimulator:
             # self.renderer.setup_padded_projection()
 
             self.renderer.clear()
-            self.renderer.draw_path(
-                coords_normalized, self.final_path,
-                width=self.renderer.path_width,
-                color=self.renderer.color_path
-            )
-            self.renderer.draw_cities(coords_normalized, size=1.0, color=self.renderer.color_city)
+            self.renderer.draw_path(coords_normalized, self.final_path)
+            self.renderer.draw_cities(coords_normalized)
+
+            # Record final path to video from back buffer (hold for 2 seconds worth of frames)
+            if self.options.get("record_video", False) and self.video_writer is not None:
+                fps = self.options.get("video_fps", 30)
+                final_frames = fps * 2  # 2 seconds
+                frame = self.renderer.capture_frame(from_back_buffer=True)
+                if frame is not None:
+                    frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                    for _ in range(final_frames):
+                        self.video_writer.write(frame_bgr)
+                    print(f"Recorded final path to video ({final_frames} frames)")
+
             self.renderer.swap_buffers()
 
-            if self.params["pause_initial"]:
+            if self.options["pause_initial"]:
                 self.print_results()
                 self.renderer.wait_for_key()
         else:
@@ -492,60 +785,81 @@ class TSPNBodySimulator:
 
     def cleanup(self):
         """Clean up resources."""
+        # Release video writer
+        if self.video_writer is not None:
+            if self.video_writer.isOpened():
+                self.video_writer.release()
+                print(f"\nVideo saved to: {self.options.get('video_output_path')}")
+                self.video_writer = None
+
+        # Close renderer
         if self.renderer:
             self.renderer.close()
 
 
 def main():
     """Main entry point for running the simulator."""
+    best_options = {}
+    
     # Parse command line arguments
     if len(sys.argv) > 1:
         coord_file = sys.argv[1]
     else:
         # Default dataset
         coord_file = "datasets/att48/coords.txt"
+        best_options = att48
 
     print("N-Body TSP Simulator")
     print(f"Using dataset: {coord_file}\n")
 
-    # Create simulator with custom parameters (optional)
-    nbody_options = {
-        "p": 2.0,
-        "q": 1.0,
-        "m": .10,
-        "slope_repulsion": 50.0,
+    nbody_options = best_options.get("nbody_options", {})
+    renderer_options = best_options.get("renderer_options", {})
+    simulator_options = best_options.get("simulator_options", {})
+
+    nbody_options.update({
+        # "p": 2.0,
+        # "q": 1.0,
+        # "m": .10,
+        "slope_repulsion": 50,
         "mag_attraction": 25,
         "force_cutoff_extra": 100,
-        "WALL_STRENGTH": 200.0,
+        "WALL_STRENGTH": 2000.0,
         "MASS": 80,
-        "DAMP": 20.0,
-        "force_mode": "piecewise",
-        "DT": 0.01,
-        "use_gpu": True,
-        "use_pressure": False,
-        "use_adaptive_bubbles": True,
-        "lower_pressure_limit": 1.0,
-        "upper_pressure_limit": 10.0,
-    }
+        "DAMP": 200.0,
+        # "force_mode": "piecewise",
+        # "DT": 0.01,
+        # "num_bubbles": 20,
+        # "lower_pressure_limit": 1.0,
+        # "upper_pressure_limit": 10.0,
+    })
 
-    renderer_options = {
-        "city_size": 16.0,
-        "path_width": 4.0,
-        "wall_width": 2.0,
-        "padding": 0.5,
-    }
-
-    params = {
-        "draw": True,
-        "use_gpu": True,
-        "render_frequency": 1,
-        "steps_per_wall_move": 1,
+    simulator_options.update({
+        # "use_pressure": True,
+        "use_density_grid": True,
+        "use_bubbles": True,
+        # "draw": True,
+        # "use_gpu": True,
+        # "render_frequency": 1,
         # "debug_window": True,
         # "step_mode": "step",
+        # "record_video": True,
+        # "video_output_path": None,  # Auto-generate if None
+        # "video_fps": 60,
+        # "video_record_frequency": 1,  # Record every N frames (1 = every frame)
+    })
+
+    renderer_options = {
+        "color_background": (1, 1, 1),
+        "color_density": (0.5, 0.2, 1.0),
+        "city_size": 16.0,
+        "path_width": 4.0,
+        "wall_width": 4.0,
+        "padding": 0.5,
+        "use_random_city_colors": True,
     }
 
     simulator = TSPNBodySimulator(
-        coord_file, params=params,
+        coord_file, options=simulator_options,
         nbody_options=nbody_options, renderer_options=renderer_options
     )
 
