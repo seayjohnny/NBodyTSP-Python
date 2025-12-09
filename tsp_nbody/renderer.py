@@ -225,7 +225,7 @@ class TSPRenderer:
         for i in range(n_cities):
             hue = (i / n_cities) * 360  # Distribute hues evenly
             saturation = 0.7 + np.random.rand() * 0.3  # High saturation (70-100%)
-            value = 0.7 + np.random.rand() * 0.3  # High value (70-100%)
+            value = 0.5 + np.random.rand() * 0.3  # High value (70-100%)
 
             # Convert HSV to RGB
             c = value * saturation
@@ -275,12 +275,23 @@ class TSPRenderer:
 
         _size = size if size is not None else self.city_size
 
-        glPointSize(_size)
+        
+        black = (0.0, 0.0, 0.0)
 
+        # Draw outline
+        glColor3f(*black)
+        glPointSize(_size + 2)
+        glBegin(GL_POINTS)
+        for pos in positions:
+            glVertex2f(pos[0], pos[1])
+        glEnd()
+
+        glPointSize(_size)
         # Use per-city colors if available and no override color specified
         if self.city_colors is not None and self.use_random_city_colors:
             glBegin(GL_POINTS)
             for i, pos in enumerate(positions):
+                # Draw city point
                 if i < len(self.city_colors):
                     glColor3f(*self.city_colors[i])
                 else:
@@ -291,9 +302,10 @@ class TSPRenderer:
             # Use single color for all points
             color = color or self.color_city
             glColor3f(*color)
-
+            glPointSize(_size)
             glBegin(GL_POINTS)
             for pos in positions:
+                # Draw city point
                 glVertex2f(pos[0], pos[1])
             glEnd()
     

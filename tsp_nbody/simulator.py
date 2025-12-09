@@ -5,6 +5,7 @@ Orchestrates the complete N-body physics simulation for solving TSP.
 """
 import sys
 import time
+import json
 import logging
 import numpy as np
 
@@ -783,6 +784,41 @@ class TSPNBodySimulator:
 
         print("\n" + "=" * 60 + "\n")
 
+    def save_results(self, output_path: str):
+        """
+        Save final path results to a file.
+
+        Args:
+            output_path: Path to output file
+        """
+        if self.final_path is None:
+            print("No final path to save.")
+            return
+
+        with open(output_path, 'w') as f:
+            for city_idx in self.final_path:
+                f.write(f"{city_idx}\n")
+
+        print(f"Final path saved to: {output_path}")
+
+    def save_options(self, output_path: str):
+        """
+        Save simulator options to a JSON file.
+
+        Args:
+            output_path: Path to output JSON file
+        """
+        all_options = {
+            "simulator_options": self.options,
+            "nbody_options": self.nbody_options,
+            "renderer_options": self.renderer_options,
+        }
+
+        with open(output_path, 'w') as f:
+            json.dump(all_options, f, indent=4)
+
+        print(f"Simulator options saved to: {output_path}")
+
     def cleanup(self):
         """Clean up resources."""
         # Release video writer
@@ -806,8 +842,8 @@ def main():
         coord_file = sys.argv[1]
     else:
         # Default dataset
-        coord_file = "datasets/att48/coords.txt"
-        best_options = att48
+        coord_file = "datasets/rand8/coords.txt"
+        # best_options = att48
 
     print("N-Body TSP Simulator")
     print(f"Using dataset: {coord_file}\n")
@@ -835,25 +871,26 @@ def main():
 
     simulator_options.update({
         # "use_pressure": True,
-        "use_density_grid": True,
-        "use_bubbles": True,
+        # "use_density_grid": True,
+        # "use_bubbles": True,
         # "draw": True,
-        # "use_gpu": True,
-        # "render_frequency": 1,
+        # "use_gpu": False,
+        "render_frequency": 1,
         # "debug_window": True,
         # "step_mode": "step",
-        # "record_video": True,
+        "record_video": True,
         # "video_output_path": None,  # Auto-generate if None
-        # "video_fps": 60,
+        "video_fps": 60,
         # "video_record_frequency": 1,  # Record every N frames (1 = every frame)
     })
 
     renderer_options = {
+        "window_size": (400, 400),
         "color_background": (1, 1, 1),
         "color_density": (0.5, 0.2, 1.0),
-        "city_size": 16.0,
-        "path_width": 4.0,
-        "wall_width": 4.0,
+        "city_size": 12.0,
+        "path_width": 3.0,
+        "wall_width": 3.0,
         "padding": 0.5,
         "use_random_city_colors": True,
     }
@@ -874,6 +911,14 @@ def main():
 
         # Print results
         # simulator.print_results()
+
+        # Save results
+        output_path = Path(coord_file).with_suffix('.tour.txt')
+        simulator.save_results(str(output_path))
+
+        # Save options
+        options_output_path = Path(coord_file).with_suffix('.options.json')
+        simulator.save_options(str(options_output_path))
 
         # Cleanup
         simulator.cleanup()

@@ -1,0 +1,102 @@
+{
+    "simulator_options": {
+        "steps_per_wall_move": 1,
+        "use_gpu": true,
+        "use_pressure": false,
+        "use_density_grid": false,
+        "use_bubbles": false,
+        "draw": true,
+        "render_frequency": 1,
+        "pause_initial": true,
+        "step_mode": "continuous",
+        "record_video": true,
+        "video_output_path": "videos\\coords_20251209_125044.mp4",
+        "video_fps": 60,
+        "video_record_frequency": 1,
+        "debug_window": false,
+        "debug_update_frequency": 10
+    },
+    "nbody_options": {
+        "use_gpu": true,
+        "DAMP": 200.0,
+        "MASS": 80,
+        "WALL_STRENGTH": 2000.0,
+        "FORCE_CUTOFF": 100000.0,
+        "DT": 0.01,
+        "DR": 0.01,
+        "force_mode": "piecewise",
+        "slope_repulsion": 50,
+        "mag_attraction": 25,
+        "force_cutoff_extra": 100,
+        "p": 6,
+        "q": 12,
+        "m": -0.05,
+        "lower_pressure_limit": 1.0,
+        "upper_pressure_limit": 10.0,
+        "use_pressure": false,
+        "use_density_grid": false,
+        "use_bubbles": false
+    },
+    "renderer_options": {
+        "window_size": [
+            400,
+            400
+        ],
+        "title": "N-Body TSP Simulator",
+        "city_size": 12.0,
+        "path_width": 3.0,
+        "wall_width": 3.0,
+        "padding": 0.5,
+        "show_grid": false,
+        "show_density": false,
+        "show_bubbles": false,
+        "use_random_city_colors": true,
+        "color_background": [
+            1,
+            1,
+            1
+        ],
+        "color_city": [
+            0.2,
+            0.0,
+            1.0
+        ],
+        "color_path": [
+            0.0,
+            0.5,
+            0.0
+        ],
+        "color_wall_contract": [
+            1.0,
+            0.0,
+            0.0
+        ],
+        "color_wall_static": [
+            0.3,
+            0.3,
+            0.0
+        ],
+        "color_wall_expand": [
+            0.0,
+            0.0,
+            1.0
+        ],
+        "color_bubble": [
+            0.2,
+            0.8,
+            1.0
+        ],
+        "color_density": [
+            0.5,
+            0.2,
+            1.0
+        ],
+        "color_text": [
+            1.0,
+            1.0,
+            1.0
+        ],
+        "record_video": false,
+        "video_fps": 30
+    }
+}
