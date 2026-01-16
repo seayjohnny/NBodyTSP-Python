@@ -173,42 +173,6 @@ class PathExtractor:
         
         return comparison
     
-    def compare_paths(self, coords: np.ndarray, path_a: np.ndarray, 
-                     path_b: np.ndarray, labels: Tuple[str, str] = ('Path A', 'Path B')) -> dict:
-        """
-        Compare two TSP paths.
-        
-        Args:
-            coords: Original city coordinates
-            path_a: First path
-            path_b: Second path
-            labels: Names for the two paths
-            
-        Returns:
-            Dictionary with comparison results
-        """
-        cost_a = self.calculate_path_cost(coords, path_a)
-        cost_b = self.calculate_path_cost(coords, path_b)
-        
-        stats_a = self.calculate_path_statistics(coords, path_a)
-        stats_b = self.calculate_path_statistics(coords, path_b)
-        
-        comparison = {
-            labels[0]: {
-                'cost': cost_a,
-                'stats': stats_a,
-            },
-            labels[1]: {
-                'cost': cost_b,
-                'stats': stats_b,
-            },
-            'cost_difference': cost_a - cost_b,
-            'percent_error': 100.0 * (cost_a - cost_b) / cost_b if cost_b > 0 else 0.0,
-            'better_path': labels[0] if cost_a < cost_b else labels[1],
-        }
-        
-        return comparison
-    
     def print_path(self, path: np.ndarray, max_cities: int = 20):
         """
         Print path in a readable format.

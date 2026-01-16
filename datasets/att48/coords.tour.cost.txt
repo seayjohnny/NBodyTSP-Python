@@ -1,3 +1,0 @@
-Final Cost: 37965.4570
-Optimal cost: 33523.7080
-Percent error: 13.2496%

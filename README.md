@@ -120,14 +120,13 @@ simulator = TSPNBodySimulator('datasets/bay29/coords.txt', params)
 
 ### Examples
 
-The `examples/basic.py` file contains six comprehensive examples:
+The `examples/basic.py` file contains five comprehensive examples:
 
 1. **Basic Usage**: Simple simulation with default parameters
-2. **Custom Parameters**: Adjust physics and simulation settings
-3. **Headless Mode**: Run without visualization for faster execution
-4. **Method Comparison**: Compare pressure and bubble methods
-5. **Batch Processing**: Process multiple datasets automatically
-6. **Custom Coordinates**: Generate and solve random TSP instances
+2. **Headless Mode**: Run without visualization for faster execution
+3. **Batch Processing**: Process multiple datasets automatically
+4. **Parameter Sweep**: Test different physics parameter combinations
+5. **Random Dataset**: Generate and solve random TSP instances with statistics
 
 Run examples:
 ```bash
@@ -141,12 +140,12 @@ tsp-nbody-python/
 ├── tsp_nbody/                  # Main package
 │   ├── __init__.py             # Package initialization
 │   ├── advanced_features.py    # Additional features
-│   ├── best_results.py         # Distionaries of best options found so far
+│   ├── best_results.py         # Dictionaries of best options found so far
 │   ├── debug_window.py         # Debug window class
 │   ├── simulator.py            # Main simulator class
 │   ├── physics_engine.py       # N-body physics calculations (GPU/CPU)
 │   ├── path_extraction.py      # Tour extraction from particle positions
-│   ├── renderer.py             # Pygame visualization
+│   ├── renderer.py             # Pygame/OpenGL visualization
 │   └── dataio.py               # Dataset I/O utilities
 ├── datasets/               # TSP benchmark instances
 │   ├── bay29/             # 29-city instance
@@ -155,6 +154,8 @@ tsp-nbody-python/
 │   └── ...
 ├── examples/              # Example scripts
 │   └── basic.py           # Comprehensive examples
+├── results/               # Experiment results (CSV files)
+├── videos/                # Recorded simulation videos (MP4)
 ├── main.py                # Main entry point
 ├── pyproject.toml         # Project configuration
 └── .python-version        # Python version specification
@@ -302,7 +303,7 @@ An enhanced method that addresses local clustering issues in non-uniform distrib
 2. Inserting additional "bubble" forces in high-density regions
 3. Breaking apart local clusters for better global ordering
 
-Enable with `use_density_grid=Truw` and `use_bubbles=True` in parameters.
+Enable with `use_density_grid=True` and `use_bubbles=True` in parameters.
 
 ## Datasets
 

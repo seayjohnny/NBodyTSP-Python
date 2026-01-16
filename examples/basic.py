@@ -5,7 +5,6 @@ This script demonstrates various ways to use the simulator.
 """
 
 from tsp_nbody.simulator import TSPNBodySimulator
-from tsp_nbody.path_extraction import nearest_neighbor_tsp
 import sys
 import numpy as np
 
@@ -35,7 +34,7 @@ def example_basic():
 
 
 def example_no_visualization():
-    """Example 3: Running without visualization (headless mode)."""
+    """Example 2: Running without visualization (headless mode)."""
     print("\n" + "=" * 70)
     print("EXAMPLE 3: Headless Mode (No Visualization)")
     print("=" * 70)
@@ -59,7 +58,7 @@ def example_no_visualization():
 
 
 def example_batch_processing():
-    """Example 5: Process multiple datasets."""
+    """Example 3: Process multiple datasets."""
     print("\n" + "=" * 70)
     print("EXAMPLE 5: Batch Processing")
     print("=" * 70)
@@ -128,7 +127,7 @@ def example_batch_processing():
 
 
 def example_param_sweep():
-    """Example 7: Parameter sweep to analyze effects."""
+    """Example 4: Parameter sweep to analyze effects."""
 
     print("\n" + "=" * 70)
     print("EXAMPLE 7: Parameter Sweep")
@@ -202,22 +201,22 @@ def example_random_dataset():
         'run_brute_force': True,
     }
 
-    n_cities = 10
-    num_runs = 100
+    n_cities = 8
+    num_runs = 10
     total_percent_error = 0.0
     total_best_nn_percent_error = 0.0
     total_first_nn_percent_error = 0.0
 
     # Create results CSV file
-    # with open(f"random_dataset_results_{n_cities}_cities.csv", "w") as f:
-    #     header = "Run,Optimal Cost,N-Body Cost,N-Body Error,"
-    #     for i in range(n_cities):
-    #         header += f"NN Run {i+1} Cost,NN Run {i+1} Error,"
+    with open(f"random_dataset_results_{n_cities}_cities.csv", "w") as f:
+        header = "Run,Optimal Cost,N-Body Cost,N-Body Error,"
+        for i in range(n_cities):
+            header += f"NN Run {i+1} Cost,NN Run {i+1} Error,"
         
-    #     header = header.rstrip(",")
-    #     f.write(header + "\n")
+        header = header.rstrip(",")
+        f.write(header + "\n")
 
-    for run in range(97,num_runs+1):
+    for run in range(num_runs+1):
         np.random.seed(run)
         random_coords = np.random.rand(n_cities, 2)
         simulator = TSPNBodySimulator(
@@ -282,10 +281,10 @@ def main():
         print("\nAvailable examples:")
         for key, (name, _) in examples.items():
             print(f"  {key}. {name}")
-        print("\nUsage: python examples.py [1-4]")
+        print("\nUsage: python examples.py [1-5] or 'all'")
         print("       python examples.py all    # Run all examples\n")
 
-        choice = input("Select example (1-4, or 'all'): ").strip()
+        choice = input("Select example (1-5, or 'all'): ").strip()
 
     if choice.lower() == "all":
         for key, (name, func) in examples.items():

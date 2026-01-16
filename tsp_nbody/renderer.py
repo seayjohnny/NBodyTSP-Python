@@ -524,7 +524,7 @@ class TSPRenderer:
             position: (x, y) position in screen coordinates (pixels from top-left)
             color: RGB color tuple (0-255 range), or None for default white
         """
-        return
+
         if not self.is_initialized or self.font is None:
             return
 
@@ -943,16 +943,6 @@ class TSPRenderer:
                         self.toggle_pause()
             pygame.time.wait(10)
     
-    def limit_framerate(self, fps: int = 60):
-        """
-        Limit rendering frame rate.
-        
-        Args:
-            fps: Target frames per second
-        """
-        if self.clock:
-            self.clock.tick(fps)
-    
     def focus_window(self):
         """Bring the window to the foreground (Windows only)."""
         if not self.is_initialized or not WIN_GUI_AVAILABLE:
@@ -971,53 +961,3 @@ class TSPRenderer:
             pygame.quit()
             self.is_initialized = False
             print("Renderer closed")
-
-
-# Example usage
-if __name__ == "__main__":
-    # Create test data
-    np.random.seed(42)
-    n_cities = 30
-    
-    # Random cities in a circle
-    angles = np.linspace(0, 2*np.pi, n_cities, endpoint=False)
-    positions = np.column_stack([
-        0.8 * np.cos(angles),
-        0.8 * np.sin(angles)
-    ])
-    
-    # Initialize renderer
-    renderer = TSPRenderer()
-    if not renderer.initialize():
-        print("Failed to initialize renderer")
-        sys.exit(1)
-    
-    # Animation loop
-    print("Running animation test...")
-    print("Press ESC to quit")
-    
-    inner_radius = 0.0
-    outer_radius = 1.0
-    frame = 0
-    
-    running = True
-    while running and frame < 300:
-        # Handle events
-        running = renderer.handle_events()
-        
-        # Animate walls
-        inner_radius = min(inner_radius + 0.002, outer_radius - 0.1)
-        
-        # Draw frame
-        renderer.clear()
-        renderer.draw_walls(inner_radius, outer_radius, 1, 0)
-        renderer.draw_cities(positions, size=6.0)
-        renderer.swap_buffers()
-        
-        # Limit framerate
-        renderer.limit_framerate(60)
-        
-        frame += 1
-    
-    renderer.close()
-    print("Animation test complete")

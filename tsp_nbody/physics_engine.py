@@ -15,7 +15,7 @@ except ImportError:
     print("Warning: CuPy not available. Falling back to CPU (NumPy)")
     GPU_AVAILABLE = False
 
-from tsp_nbody.advanced_features import ImprovedWallForces, AdaptiveBubbles
+from tsp_nbody.advanced_features import AdaptiveBubbles
 
 
 class NBodyPhysicsOptions(TypedDict, total=False):
@@ -1029,20 +1029,6 @@ class NBodyPhysicsEngine:
         angles = np.arctan2(pos[:, 1], pos[:, 0])
         return np.argsort(angles)
 
-    def compute_tour_cost(self) -> float:
-        """Compute the cost of the current tour."""
-        tour = self.get_final_tour()
-        init_pos = self.coords if not self.use_gpu else cp.asnumpy(self.coords)
-
-        cost = 0.0
-        for i in range(len(tour)):
-            curr_city = tour[i]
-            next_city = tour[(i + 1) % len(tour)]
-            diff = init_pos[next_city] - init_pos[curr_city]
-            cost += np.sqrt(np.sum(diff**2))
-
-        return cost
-
     def get_debug_data(self) -> dict:
         """
         Bundle all debug data for visualization.
@@ -1063,56 +1049,3 @@ class NBodyPhysicsEngine:
             'accelerations': acc,
             'distances': distances,
         }
-
-
-# Example usage
-if __name__ == "__main__":
-    # Test TSP mode
-    print("=" * 60)
-    print("Testing TSP Mode")
-    print("=" * 60)
-
-    n_cities = 48
-    np.random.seed(42)
-    coords = np.random.randn(n_cities, 2).astype(np.float32) * 10.0
-
-    engine = NBodyPhysicsEngine(coords, use_gpu=True)
-
-    p = 3.5
-    q = p + 2.5
-    h = 1.5
-    engine.set_parameters(p, q, h)
-
-    engine.initialize_physics()
-
-    init_pos = engine.get_positions_cpu()
-    max_dist = np.max(np.sqrt(np.sum(init_pos**2, axis=1)))
-
-    inner_radius = 0.0
-    outer_radius = max_dist
-
-    print(f"\nSimulation parameters:")
-    print(f"  p={p}, q={q}, h={h}")
-    print(f"  Initial outer radius: {outer_radius:.4f}")
-
-    print("\nRunning TSP simulation...")
-    step = 0
-    while inner_radius < outer_radius - engine.DR:
-        t = 0.0
-        while t < 1.0:
-            engine.integrate_step(inner_radius, outer_radius)
-            t += engine.DT
-            step += 1
-
-        inner_radius += engine.DR
-
-        if int(inner_radius * 100) % 10 == 0:
-            ke = engine.compute_kinetic_energy()
-            print(f"  Inner radius: {inner_radius:.2f}, KE: {ke:.4f}")
-
-    tour = engine.get_final_tour()
-    cost = engine.compute_tour_cost()
-
-    print(f"\nTSP simulation complete:")
-    print(f"  Total steps: {step}")
-    print(f"  Final tour cost: {cost:.4f}")

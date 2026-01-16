@@ -6,11 +6,10 @@ Orchestrates the complete N-body physics simulation for solving TSP.
 import sys
 import time
 import json
-import logging
 import numpy as np
 
 from pathlib import Path
-from typing import Optional, Tuple, Dict, TypedDict
+from typing import Optional, Tuple, TypedDict
 from datetime import datetime
 
 try:
@@ -25,12 +24,10 @@ except ImportError:
     pygame = None
 
 # Import our modules
-from tsp_nbody.dataio import TSPDataLoader, load_optimal_path, load_optimal_cost
+from tsp_nbody.dataio import TSPDataLoader, load_optimal_cost
 from tsp_nbody.physics_engine import NBodyPhysicsEngine, NBodyPhysicsOptions, default_nbody_options
 from tsp_nbody.path_extraction import PathExtractor, random_nearest_neighbor_tsp, brute_force_tsp
 from tsp_nbody.renderer import TSPRenderer, RendererOptions, default_renderer_options, OPENGL_AVAILABLE
-from tsp_nbody.best_results import att48, ch150
-
 
 class SimulatorOptions(TypedDict, total=False):
     """Typed dictionary for simulator options."""
@@ -854,7 +851,7 @@ class TSPNBodySimulator:
         if self.compare_nearest_neighbor:
             # Calculate nearest neighbor for comparison
             print(f"Nearest Neighbor cost: {self.best_nn_comparison['cost']:.4f}")
-            print(f"Percent error (NN vs Optimal): {self.best_nn_comparison['percent_error']:.2f}%")
+            print(f"Percent error (NN vs Optimal): {self.best_nn_comparison['percent_error']:.4f}%")
             
             print(f"Best NN Duration: {self.nn_results['best']['duration']:.4f} seconds")
             print(f"Total NN Duration (all samples): {self.nn_results.get('total_duration', 0.0):.4f} seconds")
@@ -960,10 +957,10 @@ def main():
 
     nbody_options.update({
         "use_gpu": True,
-        "DAMP": 20.0,
+        "DAMP": 200.0,
         "MASS": 80,
-        "WALL_STRENGTH": 200.0,
-        "FORCE_CUTOFF": 100000.0,
+        "WALL_STRENGTH": 2000.0,
+        "FORCE_CUTOFF": 10000.0,
         "DT": 0.01,
         "DR": 0.01,
         "force_mode": "piecewise",
@@ -980,22 +977,22 @@ def main():
         "use_pressure": False,
         "use_density_grid": True,
         "use_bubbles": True,
-        "num_bubbles": 8
+        "num_bubbles": 4
     })
 
     simulator_options.update({
         # "use_pressure": True,
         "use_density_grid": True,
         "use_bubbles": True,
-        "draw": False,
+        "draw": True,
         # "use_gpu": False,
-        "render_frequency": 60,
+        "render_frequency": 30,
         # "debug_window": True,
         # "step_mode": "step",
-        "record_video": False,
+        "record_video": True,
         # "video_output_path": None,  # Auto-generate if None
         "video_fps": 60,
-        # "video_record_frequency": 1,  # Record every N frames (1 = every frame)
+        "video_record_frequency": 1,  # Record every N frames (1 = every frame)
         # "compare_nearest_neighbor": True,
         "compare_nearest_neighbor": False,
     })
@@ -1004,114 +1001,12 @@ def main():
         "window_size": (400, 400),
         "color_background": (1, 1, 1),
         "color_density": (0.5, 0.2, 1.0),
-        "city_size": 12.0,
+        "city_size": 4.0,
         "path_width": 3.0,
         "wall_width": 3.0,
         "padding": 0.5,
         "use_random_city_colors": True,
     }
-
-    # simulator_options = {
-    #     "norm_factor": 1.0,
-    #     "steps_per_wall_move": 1,
-    #     "use_gpu": True,
-    #     "use_pressure": False,
-    #     "use_density_grid": False,
-    #     "use_bubbles": False,
-    #     "draw": True,
-    #     "render_frequency": 1,
-    #     "pause_initial": True,
-    #     "step_mode": "continuous",
-    #     "record_video": True,
-    #     "video_fps": 60,
-    #     "video_record_frequency": 1,
-    #     "debug_window": False,
-    #     "debug_update_frequency": 10
-    # }
-    # nbody_options = {
-    #     "use_gpu": True,
-    #     "DAMP": 20.0,
-    #     "MASS": 80,
-    #     "WALL_STRENGTH": 20000.0,
-    #     "FORCE_CUTOFF": 100000.0,
-    #     "DT": 0.01,
-    #     "DR": 0.01,
-    #     "force_mode": "piecewise",
-    #     "slope_repulsion": 50.0,
-    #     "mag_attraction": 25,
-    #     "force_cutoff_extra": 100,
-    #     "p": 6,
-    #     "q": 12,
-    #     "m": -0.05,
-    #     "lower_pressure_limit": 1.0,
-    #     "upper_pressure_limit": 10.0,
-    #     "use_pressure": False,
-    #     "use_density_grid": False,
-    #     "use_bubbles": False,
-    #     "num_bubbles": 3
-    # }
-    # renderer_options =  {
-    #     "window_size": [
-    #         400,
-    #         400
-    #     ],
-    #     "title": "N-Body TSP Simulator",
-    #     "city_size": 4.0,
-    #     "path_width": 3.0,
-    #     "wall_width": 3.0,
-    #     "padding": 0.5,
-    #     "show_grid": False,
-    #     "show_density": False,
-    #     "show_bubbles": False,
-    #     "use_random_city_colors": True,
-    #     "color_background": [
-    #         1,
-    #         1,
-    #         1
-    #     ],
-    #     "color_city": [
-    #         0.2,
-    #         0.0,
-    #         1.0
-    #     ],
-    #     "color_path": [
-    #         0.0,
-    #         0.5,
-    #         0.0
-    #     ],
-    #     "color_wall_contract": [
-    #         1.0,
-    #         0.0,
-    #         0.0
-    #     ],
-    #     "color_wall_static": [
-    #         0.3,
-    #         0.3,
-    #         0.0
-    #     ],
-    #     "color_wall_expand": [
-    #         0.0,
-    #         0.0,
-    #         1.0
-    #     ],
-    #     "color_bubble": [
-    #         0.2,
-    #         0.8,
-    #         1.0
-    #     ],
-    #     "color_density": [
-    #         0.5,
-    #         0.2,
-    #         1.0
-    #     ],
-    #     "color_text": [
-    #         1.0,
-    #         1.0,
-    #         1.0
-    #     ],
-    #     "record_video": False,
-    #     "video_fps": 30
-    # }
 
     simulator = TSPNBodySimulator(
         coord_file, options=simulator_options,

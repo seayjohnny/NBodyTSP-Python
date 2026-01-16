@@ -160,10 +160,6 @@ class DebugWindow:
         except Exception as e:
             print(f"Error updating debug window: {e}")
 
-    def is_visible(self) -> bool:
-        """Check if the debug window is still open."""
-        return self.is_open and self.window is not None
-
     def _on_close(self):
         """Handle window close event."""
         self.is_open = False
