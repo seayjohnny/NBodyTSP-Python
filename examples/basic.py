@@ -209,15 +209,15 @@ def example_random_dataset():
     total_first_nn_percent_error = 0.0
 
     # Create results CSV file
-    with open(f"random_dataset_results_{n_cities}_cities.csv", "w") as f:
-        header = "Run,Optimal Cost,N-Body Cost,N-Body Error,"
-        for i in range(n_cities):
-            header += f"NN Run {i+1} Cost,NN Run {i+1} Error,"
+    # with open(f"random_dataset_results_{n_cities}_cities.csv", "w") as f:
+    #     header = "Run,Optimal Cost,N-Body Cost,N-Body Error,"
+    #     for i in range(n_cities):
+    #         header += f"NN Run {i+1} Cost,NN Run {i+1} Error,"
         
-        header = header.rstrip(",")
-        f.write(header + "\n")
+    #     header = header.rstrip(",")
+    #     f.write(header + "\n")
 
-    for run in range(num_runs):
+    for run in range(97,num_runs+1):
         np.random.seed(run)
         random_coords = np.random.rand(n_cities, 2)
         simulator = TSPNBodySimulator(
