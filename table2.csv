@@ -1,0 +1,5 @@
+instance,n_cities,simple runtime,pressure runtime,bubble runtime,single nn runtime, total nn runtime
+4x4 grid,16,0.0437 seconds,0.8388 seconds,0.1433 seconds,0.0002 seconds,0.0030 seconds
+att48,48,0.4455 seconds,4.1297 seconds,0.4664 seconds,0.0017 seconds,0.0850 seconds
+bay29,29, 0.1098 seconds,0.6218 seconds,0.4549 seconds,0.0006 seconds,0.0190 seconds
+ch150,150,2.9846 seconds,40.2548 seconds,13.8040 seconds,0.0151 seconds,2.3229 seconds

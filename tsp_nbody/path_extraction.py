@@ -381,6 +381,8 @@ def random_nearest_neighbor_tsp(coords: np.ndarray, num_samples: int = 1) -> Tup
         'runs': [],
     }
 
+    total_duration = 0.0
+
     for _ in range(max_samples):
         start_city = np.random.randint(len(coords))
         while start_city in used_starts:
@@ -391,7 +393,10 @@ def random_nearest_neighbor_tsp(coords: np.ndarray, num_samples: int = 1) -> Tup
         results['runs'].append({
             'path': path,
             'cost': cost,
+            'duration': duration,
         })
+
+        total_duration += duration
 
         if _ == 0:
             first_path = path
@@ -406,12 +411,16 @@ def random_nearest_neighbor_tsp(coords: np.ndarray, num_samples: int = 1) -> Tup
     results['best'] = {
         'path': best_path,
         'cost': best_cost,
+        'duration': best_duration,
     }
 
     results['first'] = {
         'path': first_path,
         'cost': first_cost,
+        'duration': first_duration,
     }
+
+    results['total_duration'] = total_duration
 
     return results
 

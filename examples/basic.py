@@ -202,7 +202,7 @@ def example_random_dataset():
         'run_brute_force': True,
     }
 
-    n_cities = 9
+    n_cities = 10
     num_runs = 100
     total_percent_error = 0.0
     total_best_nn_percent_error = 0.0

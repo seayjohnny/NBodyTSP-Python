@@ -1,21 +1,25 @@
 {
     "simulator_options": {
-        "norm_factor": 1.2,
+        "norm_factor": 1.0,
         "steps_per_wall_move": 1,
         "use_gpu": true,
-        "use_pressure": true,
+        "use_pressure": false,
         "use_density_grid": true,
         "use_bubbles": true,
-        "draw": true,
-        "render_frequency": 120,
+        "run_brute_force": false,
+        "draw": false,
+        "render_frequency": 60,
         "pause_initial": true,
         "step_mode": "continuous",
-        "record_video": true,
-        "video_output_path": "videos\\coords_20251209_182213.mp4",
+        "record_video": false,
+        "video_output_path": null,
         "video_fps": 60,
         "video_record_frequency": 1,
         "debug_window": false,
-        "debug_update_frequency": 10
+        "debug_update_frequency": 10,
+        "print_results": true,
+        "compare_optimal": true,
+        "compare_nearest_neighbor": false
     },
     "nbody_options": {
         "use_gpu": true,
@@ -36,7 +40,7 @@
         "upper_pressure_limit": 10.0,
         "grid_bins": 8,
         "min_bin_density": 3,
-        "use_pressure": true,
+        "use_pressure": false,
         "use_density_grid": true,
         "use_bubbles": true,
         "num_bubbles": 8
@@ -47,7 +51,7 @@
             400
         ],
         "title": "N-Body TSP Simulator",
-        "city_size": 4.0,
+        "city_size": 12.0,
         "path_width": 3.0,
         "wall_width": 3.0,
         "padding": 0.5,
