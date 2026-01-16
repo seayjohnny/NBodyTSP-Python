@@ -70,7 +70,7 @@ default_renderer_options: RendererOptions = {
     "show_density": False,
     "show_bubbles": False,
     "use_random_city_colors": False,
-    "color_background": (0.9, 0.9, 1.0),
+    "color_background": (1.0,1.0, 1.0),
     "color_city": (0.2, 0.0, 1.0),
     "color_path": (0.0, 0.5, 0.0),
     "color_wall_contract": (1.0, 0.0, 0.0),
@@ -524,6 +524,7 @@ class TSPRenderer:
             position: (x, y) position in screen coordinates (pixels from top-left)
             color: RGB color tuple (0-255 range), or None for default white
         """
+        return
         if not self.is_initialized or self.font is None:
             return
 

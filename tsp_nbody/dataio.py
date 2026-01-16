@@ -22,8 +22,8 @@ class TSPDataLoader:
         """
         self.filepath = Path(filepath) if filepath is not None else None
         self.coords = coords
-        self.original_coords = None
-        self.n_cities = 0
+        self.original_coords = coords.copy() if coords is not None else None
+        self.n_cities = len(coords) if coords is not None else 0
         self.geometric_center = None
         self.normalizing_factor = 1.0
         self.bounding_box = None
@@ -37,7 +37,7 @@ class TSPDataLoader:
         Returns:
             numpy array of shape (n, 2) with coordinates
         """
-        if not self.filepath.exists():
+        if self.filepath and not self.filepath.exists():
             raise FileNotFoundError(f"Coordinate file not found: {self.filepath}")
         
         coords_list = []
@@ -213,7 +213,8 @@ class TSPDataLoader:
             Dictionary with preprocessing statistics
         """
         # Load data
-        self.load_coordinates()
+        if self.coords is None and self.filepath is not None:
+            self.load_coordinates()
         
         # Get initial bounding box
         bbox_before = self.get_bounding_box()
@@ -350,6 +351,35 @@ def generate_grid_dataset(
 
     with open(f"grid_{n_rows}x{n_cols}_tour_len.txt", 'w') as f:
         f.write(f"{optimal_cost}\n")
+
+
+def generate_random_dataset(
+    n_cities: int,
+    x_range: Tuple[float, float] = (0.0, 100.0),
+    y_range: Tuple[float, float] = (0.0, 100.0),
+) -> np.ndarray:
+    """
+    Generate a random dataset of city coordinates.
+    
+    Args:
+        n_cities: Number of cities to generate
+        x_range: Tuple specifying the (min, max) range for x-coordinates
+        y_range: Tuple specifying the (min, max) range for y-coordinates
+        
+    Returns:
+        numpy array of shape (n_cities, 2) with random coordinates
+    """
+    x_coords = np.random.uniform(x_range[0], x_range[1], n_cities)
+    y_coords = np.random.uniform(y_range[0], y_range[1], n_cities)
+    
+    coords = np.column_stack((x_coords, y_coords))
+    
+    # Write to file
+    with open(f"random_{n_cities}_coords.txt", 'w') as f:
+        for coord in coords:
+            f.write(f"{coord[0]} {coord[1]}\n")
+    
+    return coords
 
 
 # Example usage

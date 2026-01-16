@@ -721,7 +721,7 @@ void display()
         printf("\t🗹  N-body path cost calculated. Cost = %f\n", nBodyCost);
 
         percentDiff = 100*(nBodyCost - optimalCost)/optimalCost;
-        printf("\t🗹  N-body cost percent difference calculated. Percent Difference = %f%%\n", percentDiff);
+        printf("\t🗹  N-body cost percent difference calculated. Percent Error = %f%%\n", percentDiff);
         endTimer(&timer);
 
         params.slopeRepulsion = SLOPE_REPULSION;

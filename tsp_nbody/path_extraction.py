@@ -144,7 +144,7 @@ class PathExtractor:
         
         return stats
     
-    def compare_with_optimal(self, nbody_cost: float, optimal_cost: float) -> dict:
+    def compare_with_optimal(self, cost: float, optimal_cost: float) -> dict:
         """
         Compare N-body solution with optimal solution.
         
@@ -158,17 +158,17 @@ class PathExtractor:
         if optimal_cost <= 0:
             raise ValueError("Optimal cost must be positive")
         
-        absolute_diff = nbody_cost - optimal_cost
+        absolute_diff = cost - optimal_cost
         percent_diff = 100.0 * absolute_diff / optimal_cost
-        quality_ratio = nbody_cost / optimal_cost
+        quality_ratio = cost / optimal_cost
         
         comparison = {
-            'nbody_cost': nbody_cost,
+            'cost': cost,
             'optimal_cost': optimal_cost,
             'absolute_difference': absolute_diff,
-            'percent_difference': percent_diff,
+            'percent_error': percent_diff,
             'quality_ratio': quality_ratio,
-            'is_better': nbody_cost < optimal_cost,
+            'is_better': cost < optimal_cost,
         }
         
         return comparison
@@ -203,7 +203,7 @@ class PathExtractor:
                 'stats': stats_b,
             },
             'cost_difference': cost_a - cost_b,
-            'percent_difference': 100.0 * (cost_a - cost_b) / cost_b if cost_b > 0 else 0.0,
+            'percent_error': 100.0 * (cost_a - cost_b) / cost_b if cost_b > 0 else 0.0,
             'better_path': labels[0] if cost_a < cost_b else labels[1],
         }
         
@@ -302,6 +302,57 @@ def nearest_neighbor_tsp(coords: np.ndarray, start_city: int = 0) -> Tuple[np.nd
     return np.array(path, dtype=np.int32), cost, duration
 
 
+def brute_force_tsp(coords: np.ndarray) -> Tuple[np.ndarray, float, float]:
+    """
+    Brute-force TSP solver (for small datasets only).
+    
+    Args:
+        coords: City coordinates (n, 2)
+    Returns:
+        Tuple of (path, cost, duration)
+    """
+    import math
+    from itertools import permutations
+    
+    n = len(coords)
+    if n > 12:
+        raise ValueError("Brute-force TSP is only feasible for n <= 12")
+    
+    path_indices = np.arange(n, dtype=np.int32)
+    fixed = path_indices[0]
+    remaining_cities = path_indices[1:].tolist()
+
+    print("Starting brute-force TSP...")
+
+    best_path = None
+    best_cost = float('inf')
+
+    start_time = time.time()
+    
+    perms = permutations(remaining_cities)
+    num_perms = math.factorial(n-1)  # Divide by 2 for symmetric TSP
+    print(f"Evaluating {num_perms} permutations...")
+
+    current_perm = 0
+    for perm in perms:
+        # Skip symmetric permutations
+        current_perm += 1
+        print(f"Evaluating permutation {current_perm} of {num_perms}...", end='\r')
+        
+        path = np.array([fixed] + list(perm), dtype=np.int32)
+        extractor = PathExtractor()
+        cost = extractor.calculate_path_cost(coords, path)
+        
+        if cost < best_cost:
+            best_cost = cost
+            best_path = path
+    
+    end_time = time.time()
+    duration = end_time - start_time
+
+    return best_path, best_cost, duration
+
+
 def random_nearest_neighbor_tsp(coords: np.ndarray, num_samples: int = 1) -> Tuple[np.ndarray, float, float]:
     """
     Run the nearest neighbor TSP solver multiple times with random starts and return the best path found.
@@ -313,12 +364,23 @@ def random_nearest_neighbor_tsp(coords: np.ndarray, num_samples: int = 1) -> Tup
         Tuple of (path, cost, duration)
     """
     
+    first_path = None
+    first_cost = float('inf')
+    first_duration = 0.0
+
     best_path = None
     best_cost = float('inf')
     best_duration = 0.0
     
     used_starts = set()
     max_samples = min(num_samples, len(coords))
+
+    results = {
+        'best': {},
+        'first': {},
+        'runs': [],
+    }
+
     for _ in range(max_samples):
         start_city = np.random.randint(len(coords))
         while start_city in used_starts:
@@ -326,12 +388,32 @@ def random_nearest_neighbor_tsp(coords: np.ndarray, num_samples: int = 1) -> Tup
         used_starts.add(start_city)
 
         path, cost, duration = nearest_neighbor_tsp(coords, start_city=start_city)
+        results['runs'].append({
+            'path': path,
+            'cost': cost,
+        })
+
+        if _ == 0:
+            first_path = path
+            first_cost = cost
+            first_duration = duration
+
         if cost < best_cost:
             best_cost = cost
             best_path = path
             best_duration = duration
 
-    return best_path, best_cost, best_duration
+    results['best'] = {
+        'path': best_path,
+        'cost': best_cost,
+    }
+
+    results['first'] = {
+        'path': first_path,
+        'cost': first_cost,
+    }
+
+    return results
 
 
 # Example usage
@@ -381,4 +463,4 @@ if __name__ == "__main__":
     print(f"  Valid: {analysis['valid']}")
     if 'optimal_comparison' in analysis:
         comp = analysis['optimal_comparison']
-        print(f"  Percent from optimal: {comp['percent_difference']:.2f}%")
+        print(f"  Percent from optimal: {comp['percent_error']:.2f}%")

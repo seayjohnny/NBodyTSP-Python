@@ -36,9 +36,12 @@ class NBodyPhysicsOptions(TypedDict, total=False):
     m: float
     lower_pressure_limit: float
     upper_pressure_limit: float
+    grid_bins: int
+    min_bin_density: int
     use_pressure: bool
     use_density_grid: bool
     use_bubbles: bool
+    num_bubbles: int
 
 default_nbody_options: NBodyPhysicsOptions = {
     'use_gpu': GPU_AVAILABLE,
@@ -57,9 +60,12 @@ default_nbody_options: NBodyPhysicsOptions = {
     'm': -0.05,
     "lower_pressure_limit": 1.0,
     "upper_pressure_limit": 10.0,
-    'use_pressure': True,
+    "grid_bins": 8,
+    "min_bin_density": 3,
+    'use_pressure': False,
     'use_density_grid': False,
     'use_bubbles': False,
+    'num_bubbles': 3,
 }
 
 
@@ -119,6 +125,7 @@ class NBodyPhysicsEngine:
         # Bubble and density grid options
         self.use_density_grid = options.get('use_density_grid', False)
         self.use_bubbles = options.get('use_bubbles', False)  # Enable for dense datasets
+        self.num_bubbles = options.get('num_bubbles', 3)
 
         # Initialize adaptive bubbles
         if self.use_bubbles:
@@ -126,7 +133,7 @@ class NBodyPhysicsEngine:
                 self.coords,
                 grid_size=10,
                 density_threshold=0,
-                num_bubbles=3,
+                num_bubbles=self.num_bubbles,
                 use_gpu=self.use_gpu,
             )
         else:
@@ -136,14 +143,14 @@ class NBodyPhysicsEngine:
         self.current_pressure = 0.0
 
         # Density grid tracking (for visualization)
-        self.grid_bins = 8  # 8x8 grid like CUDA version
+        self.grid_bins = options.get('grid_bins', 8)  # 8x8 grid like CUDA version
         self.grid_bounds = np.linspace(-1.0, 1.0, self.grid_bins + 1)
         self.density_grid = np.zeros(self.grid_bins * self.grid_bins, dtype=np.int32)
         self.density_centers = np.zeros((self.grid_bins * self.grid_bins, 2), dtype=np.float32)
 
         # Bubble management (like CUDA version)
-        self.min_bin_density = 3  # Minimum density to spawn a bubble
-        self.max_bubbles = 3  # Maximum number of bubbles (spawn at top B densest cells)
+        self.min_bin_density = options.get('min_bin_density', 3)  # Minimum density to spawn a bubble
+        self.max_bubbles = self.num_bubbles  # Maximum number of bubbles (spawn at top B densest cells)
         self.bubbles = np.zeros((self.grid_bins * self.grid_bins, 4), dtype=np.float32)  # (x, y, radius, active)
         self.bubbles_enabled = False  # Will be enabled when pressure is right
 
@@ -179,7 +186,7 @@ class NBodyPhysicsEngine:
                               float4* bubbles, int numBubbles,
                               float slopeRepulsion, float magAttraction, float forceCutoffDist,
                               float iR, float oR, int N, float WALL_STRENGTH, float DAMP,
-                              float FORCE_CUTOFF, float MASS)
+                              float FORCE_CUTOFF, float MASS, float DT)
         {
             int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -295,11 +302,11 @@ class NBodyPhysicsEngine:
 
             // Update positions and velocities. We update position first to utilize
             // leap-frog integration.
-            vel[idx].x += acc[idx].x * 0.01f;
-            vel[idx].y += acc[idx].y * 0.01f;
+            vel[idx].x += acc[idx].x * DT;
+            vel[idx].y += acc[idx].y * DT;
 
-            shPos[idx].x += currentVel.x * 0.01f;
-            shPos[idx].y += currentVel.y * 0.01f;
+            shPos[idx].x += currentVel.x * DT;
+            shPos[idx].y += currentVel.y * DT;
         }
         """,
             "nBodyStepPiecewiseLJ",
@@ -359,7 +366,7 @@ class NBodyPhysicsEngine:
         void nBodyStepSmoothLJ(const float2* shInitPos, float2* shPos, float2* vel, float2* acc,
                               float p, float q, float h,
                               float iR, float oR, int N, float WALL_STRENGTH, float DAMP,
-                              float FORCE_CUTOFF, float MASS)
+                              float FORCE_CUTOFF, float MASS, float DT)
         {
             int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -432,10 +439,10 @@ class NBodyPhysicsEngine:
 
             // Update positions and velocities. We update position first to utilize
             // leap-frog integration.
-            shPos[idx].x += currentVel.x * 0.01f;
-            shPos[idx].y += currentVel.y * 0.01f;
-            vel[idx].x += acc[idx].x * 0.01f;
-            vel[idx].y += acc[idx].y * 0.01f;
+            shPos[idx].x += currentVel.x * DT;
+            shPos[idx].y += currentVel.y * DT;
+            vel[idx].x += acc[idx].x * DT;
+            vel[idx].y += acc[idx].y * DT;
         }
         """,
             "nBodyStepSmoothLJ",
@@ -618,6 +625,7 @@ class NBodyPhysicsEngine:
                     cp.float32(self.DAMP),
                     cp.float32(self.FORCE_CUTOFF),
                     cp.float32(self.MASS),
+                    cp.float32(self.DT)
                 ),
             )
         else:
@@ -642,6 +650,7 @@ class NBodyPhysicsEngine:
                     cp.float32(self.DAMP),
                     cp.float32(self.FORCE_CUTOFF),
                     cp.float32(self.MASS),
+                    cp.float32(self.DT)
                 ),
             )
 

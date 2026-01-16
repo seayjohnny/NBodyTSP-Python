@@ -1,0 +1,8 @@
+Final Cost: 10583.7227
+Optimal Cost: 9291.3525
+Percent Error: 13.9094%
+
+
+Nearest Neighbor Comparison (Best of 10 random starts):
+Nearest Neighbor Cost: 10211.1846
+N-body vs NN: -3.6483%

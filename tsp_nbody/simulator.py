@@ -27,7 +27,7 @@ except ImportError:
 # Import our modules
 from tsp_nbody.dataio import TSPDataLoader, load_optimal_path, load_optimal_cost
 from tsp_nbody.physics_engine import NBodyPhysicsEngine, NBodyPhysicsOptions, default_nbody_options
-from tsp_nbody.path_extraction import PathExtractor, random_nearest_neighbor_tsp
+from tsp_nbody.path_extraction import PathExtractor, random_nearest_neighbor_tsp, brute_force_tsp
 from tsp_nbody.renderer import TSPRenderer, RendererOptions, default_renderer_options, OPENGL_AVAILABLE
 from tsp_nbody.best_results import att48, ch150
 
@@ -35,11 +35,13 @@ from tsp_nbody.best_results import att48, ch150
 class SimulatorOptions(TypedDict, total=False):
     """Typed dictionary for simulator options."""
     # Common options
+    norm_factor: float
     steps_per_wall_move: int
     use_gpu: bool
     use_pressure: bool
     use_density_grid: bool
     use_bubbles: bool  # Requires density grid to be enabled
+    run_brute_force: bool  # For small datasets only
 
     # Rendering options
     draw: bool
@@ -59,11 +61,13 @@ class SimulatorOptions(TypedDict, total=False):
 
 
 default_simulator_options: SimulatorOptions = {
+    "norm_factor": 1.0,
     "steps_per_wall_move": 1,
     "use_gpu": True,
     "use_pressure": False,
     "use_density_grid": False,
     "use_bubbles": False,
+    "run_brute_force": False,
     "draw": True,
     "render_frequency": 10,
     "pause_initial": True,
@@ -74,6 +78,9 @@ default_simulator_options: SimulatorOptions = {
     "video_record_frequency": 1,  # Record every frame
     "debug_window": False,
     "debug_update_frequency": 10,
+    "print_results": True,
+    "compare_optimal": True,
+    "compare_nearest_neighbor": True,
 }
 
 
@@ -82,7 +89,8 @@ class TSPNBodySimulator:
 
     def __init__(
         self,
-        coord_file: str,
+        coord_file: str | None = None,
+        coords: np.ndarray | None = None,
         options: Optional[SimulatorOptions] = None,
         nbody_options: Optional[NBodyPhysicsOptions] = None,
         renderer_options: Optional[RendererOptions] = None,
@@ -94,7 +102,14 @@ class TSPNBodySimulator:
             coord_file: Path to coordinate file
             params: Optional parameter dictionary
         """
-        self.coord_file = Path(coord_file)
+
+        if coord_file is None and coords is None:
+            raise ValueError("Either coord_file or coords must be provided")
+        
+        self.coord_file = None
+        self.coords = None
+        if coord_file:
+            self.coord_file = Path(coord_file)
 
         # N-body and rendering parameters
         self.nbody_options: NBodyPhysicsEngine = default_nbody_options.copy()
@@ -118,7 +133,10 @@ class TSPNBodySimulator:
             self.renderer_options["show_bubbles"] = self.options.get("use_bubbles", False)
 
         # Components
-        self.data_loader = TSPDataLoader(str(coord_file))
+        if self.coord_file:
+            self.data_loader = TSPDataLoader(str(self.coord_file))
+        elif coords is not None:
+            self.data_loader = TSPDataLoader(coords=coords)
         self.physics_engine = None
         self.path_extractor = PathExtractor()
         self.renderer = None
@@ -127,8 +145,8 @@ class TSPNBodySimulator:
 
         # Simulation state
         self.is_initialized = False
-        self.coords = None
         self.n_cities = 0
+        self.norm_factor = self.options.get("norm_factor", 1.0)
         self.normalizing_factor = 1.0
 
         # Wall state
@@ -143,12 +161,23 @@ class TSPNBodySimulator:
         self.elapsed_time = 0.0
         self.final_path = None
         self.final_cost = 0.0
+        self.run_brute_force = self.options.get("run_brute_force", False)
         self.optimal_cost = None
+        self.compare_optimal = self.options.get("compare_optimal", True)
+        self.optimal_comparison = None
+        self.compare_nearest_neighbor = self.options.get("compare_nearest_neighbor", True)
+        self.nn_comparison = None
+        self.should_print_results = self.options.get("print_results", True)
 
         # Bubble mode selection
         self.use_dynamic_bubbles = False
 
-        print(f"Simulator created for: {self.coord_file.name}")
+        self.results = {}
+
+        if self.coord_file:
+            print(f"Simulator created for: {self.coord_file.name}")
+        else:
+            print(f"Simulator created for provided coordinates array")
 
 
     def initialize(self) -> bool:
@@ -166,9 +195,11 @@ class TSPNBodySimulator:
             # Load and preprocess data
             print("\n[1/4] Loading and preprocessing data...")
             stats = self.data_loader.preprocess(normalize_method="minimum")
+
+
             self.coords = self.data_loader.coords
             self.n_cities = self.data_loader.n_cities
-            self.normalizing_factor = self.data_loader.normalizing_factor
+            self.normalizing_factor = self.data_loader.normalizing_factor * self.norm_factor
 
             # Initialize physics engine
             print("\n[2/4] Initializing physics engine...")
@@ -182,7 +213,7 @@ class TSPNBodySimulator:
 
             # Initialize wall radii
             self.inner_radius = 0.0
-            self.outer_radius = self.data_loader.get_bounding_circle_radius()
+            self.outer_radius = self.data_loader.get_bounding_circle_radius() * self.norm_factor
             self.inner_direction = 1
             self.outer_direction = 0
 
@@ -220,14 +251,15 @@ class TSPNBodySimulator:
                     self.debug_window = None
 
             # Load optimal solution if available
-            print("\n[4/4] Loading optimal solution (if available)...")
-            dataset_dir = self.coord_file.parent
-            opt_cost_file = dataset_dir / "tour_len.txt"
-            self.optimal_cost = load_optimal_cost(str(opt_cost_file))
-            if self.optimal_cost:
-                # Adjust for normalization
-                self.optimal_cost /= self.normalizing_factor
-                print(f"Optimal cost (normalized): {self.optimal_cost:.4f}")
+            if self.coord_file:
+                print("\n[4/4] Loading optimal solution (if available)...")
+                dataset_dir = self.coord_file.parent
+                opt_cost_file = dataset_dir / "tour_len.txt"
+                self.optimal_cost = load_optimal_cost(str(opt_cost_file))
+                if self.optimal_cost:
+                    # Adjust for normalization
+                    self.optimal_cost /= self.normalizing_factor
+                    print(f"Optimal cost (normalized): {self.optimal_cost:.4f}")
 
             self.is_initialized = True
             print("\n" + "=" * 60)
@@ -597,6 +629,9 @@ class TSPNBodySimulator:
             # Store whether to use dynamic bubbles
             self.use_dynamic_bubbles = use_dynamic_bubbles
 
+            if self.nbody_options["use_density_grid"]:
+                self.physics_engine.update_density_grid(self.outer_radius)
+
             if not self.options["pause_initial"]:
                 # If not pausing initially, just render once
                 self.render_frame()
@@ -733,15 +768,63 @@ class TSPNBodySimulator:
             self.renderer.swap_buffers()
 
             if self.options["pause_initial"]:
-                self.print_results()
                 self.renderer.wait_for_key()
-        else:
+
+        # If enabled, compare with optimal and nearest neighbor
+        if self.compare_optimal:
+            print("\nComparing with optimal solution...")
+            # If brute-force enabled and dataset is small enough, run it for comparison
+            if self.run_brute_force and self.n_cities <= 12:
+                print("\nRunning brute-force TSP for comparison...")
+                bf_path, bf_cost, bf_duration = brute_force_tsp(self.coords)
+                self.optimal_cost = bf_cost * self.normalizing_factor
+
+            if self.optimal_cost is not None:
+                self.optimal_comparison = self.path_extractor.compare_with_optimal(
+                    self.final_cost, self.optimal_cost
+                )
+
+        self.nn_percent_error = None
+        self.first_nn_percent_error = None
+        if self.compare_nearest_neighbor:
+            print("\nComparing with Nearest Neighbor heuristic: ")
+            print("Getting the best of 10 random starts...")
+            nn_results = random_nearest_neighbor_tsp(
+                self.coords,
+                num_samples=12
+            )
+            best_nn_cost = nn_results['best']['cost']
+            first_nn_cost = nn_results['first']['cost']
+
+            best_nn_cost *= self.normalizing_factor
+            if self.optimal_cost is not None:
+                self.best_nn_comparison = self.path_extractor.compare_with_optimal(
+                    best_nn_cost, self.optimal_cost
+                )
+                self.nn_percent_error = self.best_nn_comparison['percent_error']
+
+            first_nn_cost *= self.normalizing_factor
+            if self.optimal_cost is not None:
+                self.first_nn_comparison = self.path_extractor.compare_with_optimal(
+                    first_nn_cost, self.optimal_cost
+                )
+                self.first_nn_percent_error = self.first_nn_comparison['percent_error']
+
+        if self.should_print_results:
             self.print_results()
 
         # Clean up debug window
         if self.debug_window:
             self.debug_window.close()
             self.debug_window = None
+
+
+        
+        self.results['final_path'] = self.final_path
+        self.results['final_cost'] = self.final_cost
+        self.results['nn_results'] = nn_results if self.compare_nearest_neighbor else None
+        self.results['optimal_comparison'] = self.optimal_comparison if self.compare_optimal else None
+
 
         return self.final_path, self.final_cost
 
@@ -751,46 +834,45 @@ class TSPNBodySimulator:
         print("SIMULATION RESULTS")
         print("=" * 60)
 
-        print(f"\nDataset: {self.coord_file.name}")
+        if self.coord_file:
+            print(f"\nDataset: {self.coord_file.name}")
+        else:
+            print(f"\nDataset: Provided coordinates array")
         print(f"Cities: {self.n_cities}")
         print(f"Elapsed time: {self.elapsed_time:.2f} seconds")
         print(f"N-body path cost: {self.final_cost:.4f}")
 
-        if self.optimal_cost is not None:
-            comparison = self.path_extractor.compare_with_optimal(
-                self.final_cost, self.optimal_cost * self.normalizing_factor
-            )
-            print(f"Optimal cost: {self.optimal_cost * self.normalizing_factor:.4f}")
-            print(f"Percent difference: {comparison['percent_difference']:.2f}%")
-
-            if comparison["is_better"]:
+        if self.compare_optimal:
+            print(f"Optimal cost: {self.optimal_comparison['optimal_cost']:.4f}")
+            print(f"Percent error: {self.optimal_comparison['percent_error']:.2f}%")
+            if self.optimal_comparison["is_better"]:
                 print("! N-body solution is BETTER than recorded optimal!")
-            elif comparison["percent_difference"] < 10.0:
+            elif self.optimal_comparison["percent_error"] < 10.0:
                 print("+ Solution is within 10% of optimal")
             else:
                 print("- Solution is >10% from optimal")
 
-        # Calculate nearest neighbor for comparison
-        print("\nComparing with Nearest Neighbor heuristic: ")
-        print("Getting the best of 10 random starts...")
-        nn_path, nn_cost, nn_duration = random_nearest_neighbor_tsp(self.data_loader.original_coords, num_samples=10)
-        print(f"Nearest Neighbor cost: {nn_cost:.4f}")
-        print(f"Nearest Neighbor elapsed time: {nn_duration:.2f} seconds")
-        improvement = 100.0 * (nn_cost - self.final_cost) / nn_cost
-        print(
-            f"N-body vs NN: {improvement:+.2f}% "
-            f"({'better' if improvement > 0 else 'worse'})"
-        )
+        if self.compare_nearest_neighbor:
+            # Calculate nearest neighbor for comparison
+            print(f"Nearest Neighbor cost: {self.best_nn_comparison['cost']:.4f}")
+            print(f"Percent error (NN vs Optimal): {self.best_nn_comparison['percent_error']:.2f}%")
+            improvement = 100.0 * (self.best_nn_comparison['cost'] - self.final_cost) / self.best_nn_comparison['cost']
+            print(
+                f"N-body vs NN: {improvement:+.2f}% "
+                f"({'better' if improvement > 0 else 'worse'})"
+            )
 
-        print("\n" + "=" * 60 + "\n")
+            print("\n" + "=" * 60 + "\n")
 
     def save_results(self, output_path: str):
         """
-        Save final path results to a file.
+        Save final path results, cost, and error difference to a file.
 
         Args:
             output_path: Path to output file
         """
+
+        # Save path to file
         if self.final_path is None:
             print("No final path to save.")
             return
@@ -800,6 +882,27 @@ class TSPNBodySimulator:
                 f.write(f"{city_idx}\n")
 
         print(f"Final path saved to: {output_path}")
+
+        # Save cost and comparison to a separate file
+        cost_output_path = Path(output_path).with_suffix('.cost.txt')
+        with open(cost_output_path, 'w') as f:
+            f.write(f"Final Cost: {self.final_cost:.4f}\n")
+            if self.optimal_cost is not None:
+                comparison = self.path_extractor.compare_with_optimal(
+                    self.final_cost, self.optimal_cost * self.normalizing_factor
+                )
+                f.write(f"Optimal Cost: {self.optimal_cost * self.normalizing_factor:.4f}\n")
+                f.write(f"Percent Error: {comparison['percent_error']:.4f}%\n")
+
+            nn_path, nn_cost, nn_duration = random_nearest_neighbor_tsp(self.data_loader.original_coords, num_samples=10)
+            f.write("\n\nNearest Neighbor Comparison (Best of 10 random starts):\n")
+            f.write(f"Nearest Neighbor Cost: {nn_cost:.4f}\n")
+            improvement = 100.0 * (nn_cost - self.final_cost) / nn_cost
+            f.write(f"N-body vs NN: {improvement:+.4f}%\n")
+
+        print(f"Cost details saved to: {cost_output_path}")
+
+
 
     def save_options(self, output_path: str):
         """
@@ -842,8 +945,8 @@ def main():
         coord_file = sys.argv[1]
     else:
         # Default dataset
-        coord_file = "datasets/rand8/coords.txt"
-        # best_options = att48
+        coord_file = "datasets/bay29/coords.txt"
+        # best_options = bay29
 
     print("N-Body TSP Simulator")
     print(f"Using dataset: {coord_file}\n")
@@ -852,47 +955,156 @@ def main():
     renderer_options = best_options.get("renderer_options", {})
     simulator_options = best_options.get("simulator_options", {})
 
-    nbody_options.update({
-        # "p": 2.0,
-        # "q": 1.0,
-        # "m": .10,
-        "slope_repulsion": 50,
+    # nbody_options.update({
+    #     # "p": 2.0,
+    #     # "q": 1.0,
+    #     # "m": .10,
+    #     # "slope_repulsion": 100,
+    #     # "mag_attraction": 25,
+    #     # "force_cutoff_extra": 100,
+    #     "WALL_STRENGTH": 200.0,
+    #     # "FORCE_CUTOFF": 10000000,
+    #     # "MASS": 80,
+    #     # "DAMP": 20,
+    #     # "force_mode": "piecewise",
+    #     "DT": 0.01,
+    #     "DR": 0.01,
+    #     # "min_bin_density": 2,
+    #     "num_bubbles": 8
+    #     # "lower_pressure_limit": 10.0,
+    #     # "upper_pressure_limit": 100.0,
+    # })
+
+    # simulator_options.update({
+    #     "norm_factor": 1.2,
+    #     "use_pressure": True,
+    #     "use_density_grid": True,
+    #     "use_bubbles": True,
+    #     # "draw": True,
+    #     # "use_gpu": False,
+    #     "render_frequency": 120,
+    #     # "debug_window": True,
+    #     # "step_mode": "step",
+    #     "record_video": True,
+    #     # "video_output_path": None,  # Auto-generate if None
+    #     "video_fps": 60,
+    #     # "video_record_frequency": 1,  # Record every N frames (1 = every frame)
+    # })
+
+    # renderer_options = {
+    #     "window_size": (400, 400),
+    #     "color_background": (1, 1, 1),
+    #     "color_density": (0.5, 0.2, 1.0),
+    #     # "show_density": False,
+    #     # "show_grid": False,
+    #     "city_size": 4.0,
+    #     # "city_size": 12.0,
+    #     "path_width": 3.0,
+    #     "wall_width": 3.0,
+    #     "padding": 0.5,
+    #     "use_random_city_colors": True,
+    # }
+
+    simulator_options = {
+        "norm_factor": 1.0,
+        "steps_per_wall_move": 1,
+        "use_gpu": True,
+        "use_pressure": False,
+        "use_density_grid": False,
+        "use_bubbles": False,
+        "draw": True,
+        "render_frequency": 1,
+        "pause_initial": True,
+        "step_mode": "continuous",
+        "record_video": True,
+        "video_fps": 60,
+        "video_record_frequency": 1,
+        "debug_window": False,
+        "debug_update_frequency": 10
+    }
+    nbody_options = {
+        "use_gpu": True,
+        "DAMP": 20.0,
+        "MASS": 80,
+        "WALL_STRENGTH": 20000.0,
+        "FORCE_CUTOFF": 100000.0,
+        "DT": 0.01,
+        "DR": 0.01,
+        "force_mode": "piecewise",
+        "slope_repulsion": 50.0,
         "mag_attraction": 25,
         "force_cutoff_extra": 100,
-        "WALL_STRENGTH": 2000.0,
-        "MASS": 80,
-        "DAMP": 200.0,
-        # "force_mode": "piecewise",
-        # "DT": 0.01,
-        # "num_bubbles": 20,
-        # "lower_pressure_limit": 1.0,
-        # "upper_pressure_limit": 10.0,
-    })
-
-    simulator_options.update({
-        # "use_pressure": True,
-        # "use_density_grid": True,
-        # "use_bubbles": True,
-        # "draw": True,
-        # "use_gpu": False,
-        "render_frequency": 1,
-        # "debug_window": True,
-        # "step_mode": "step",
-        "record_video": True,
-        # "video_output_path": None,  # Auto-generate if None
-        "video_fps": 60,
-        # "video_record_frequency": 1,  # Record every N frames (1 = every frame)
-    })
-
-    renderer_options = {
-        "window_size": (400, 400),
-        "color_background": (1, 1, 1),
-        "color_density": (0.5, 0.2, 1.0),
-        "city_size": 12.0,
+        "p": 6,
+        "q": 12,
+        "m": -0.05,
+        "lower_pressure_limit": 1.0,
+        "upper_pressure_limit": 10.0,
+        "use_pressure": False,
+        "use_density_grid": False,
+        "use_bubbles": False,
+        "num_bubbles": 3
+    }
+    renderer_options =  {
+        "window_size": [
+            400,
+            400
+        ],
+        "title": "N-Body TSP Simulator",
+        "city_size": 4.0,
         "path_width": 3.0,
         "wall_width": 3.0,
         "padding": 0.5,
+        "show_grid": False,
+        "show_density": False,
+        "show_bubbles": False,
         "use_random_city_colors": True,
+        "color_background": [
+            1,
+            1,
+            1
+        ],
+        "color_city": [
+            0.2,
+            0.0,
+            1.0
+        ],
+        "color_path": [
+            0.0,
+            0.5,
+            0.0
+        ],
+        "color_wall_contract": [
+            1.0,
+            0.0,
+            0.0
+        ],
+        "color_wall_static": [
+            0.3,
+            0.3,
+            0.0
+        ],
+        "color_wall_expand": [
+            0.0,
+            0.0,
+            1.0
+        ],
+        "color_bubble": [
+            0.2,
+            0.8,
+            1.0
+        ],
+        "color_density": [
+            0.5,
+            0.2,
+            1.0
+        ],
+        "color_text": [
+            1.0,
+            1.0,
+            1.0
+        ],
+        "record_video": False,
+        "video_fps": 30
     }
 
     simulator = TSPNBodySimulator(

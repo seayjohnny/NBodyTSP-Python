@@ -466,7 +466,7 @@ int main(int argc, char** argv)
             
             printf("N-body path cost: %.2f\n", h_rs.nbodyCost);
             printf("Optimal path cost: %.2f\n", h_rs.optimalCost);
-            printf("Percent difference: %.2f%%\n", h_rs.percentDiff);
+            printf("Percent error: %.2f%%\n", h_rs.percentDiff);
             
             endTimer(&timer);
             h_rs.runTime = timer;

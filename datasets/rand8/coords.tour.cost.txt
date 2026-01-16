@@ -1,0 +1,6 @@
+Final Cost: 3.0670
+
+
+Nearest Neighbor Comparison (Best of 10 random starts):
+Nearest Neighbor Cost: 3.1914
+N-body vs NN: +3.90%
