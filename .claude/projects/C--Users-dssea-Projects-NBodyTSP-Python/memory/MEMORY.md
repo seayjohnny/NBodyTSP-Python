@@ -1,0 +1,3 @@
+- [feedback_gpu_priority.md](feedback_gpu_priority.md) — GPU compute should be default and first-class, not CPU
+- [project_architecture.md](project_architecture.md) — Current architecture: Python physics backend + React/Vite frontend via WebSocket
+- [project_next_steps.md](project_next_steps.md) — Next: wire Bayesian optimizer into the web UI

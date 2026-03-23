@@ -27,7 +27,8 @@ class NBodyPhysicsOptions(TypedDict, total=False):
     FORCE_CUTOFF: float
     DT: float
     DR: float
-    force_mode: str  # 'piecewise' or 'smooth'
+    force_mode: str  # 'piecewise', 'smooth', or 'true_lj'
+    lj_strength: float  # LJ strength multiplier (for true_lj mode)
     slope_repulsion: float
     mag_attraction: float
     force_cutoff_extra: float
@@ -38,6 +39,8 @@ class NBodyPhysicsOptions(TypedDict, total=False):
     upper_pressure_limit: float
     grid_bins: int
     min_bin_density: int
+    wall_force_mode: str  # 'linear' or 'inverse_square'
+    wall_range_frac: float  # fraction of wall gap for inverse_square zone
     use_pressure: bool
     use_density_grid: bool
     use_bubbles: bool
@@ -52,6 +55,7 @@ default_nbody_options: NBodyPhysicsOptions = {
     'DT': 0.01,
     'DR': 0.01,
     'force_mode': 'piecewise',
+    'lj_strength': 1.0,
     'slope_repulsion': 50.0,
     'mag_attraction': 0.5,
     'force_cutoff_extra': 0.10,
@@ -62,6 +66,8 @@ default_nbody_options: NBodyPhysicsOptions = {
     "upper_pressure_limit": 10.0,
     "grid_bins": 8,
     "min_bin_density": 3,
+    'wall_force_mode': 'linear',
+    'wall_range_frac': 0.05,
     'use_pressure': False,
     'use_density_grid': False,
     'use_bubbles': False,
@@ -117,6 +123,14 @@ class NBodyPhysicsEngine:
         self.q = options.get('q', 12)
         self.m = options.get('m', -0.05)
 
+        # True LJ parameters
+        self.lj_strength = options.get('lj_strength', 1.0)
+        self.pair_sigma = None  # computed on initialize_physics
+
+        # Wall force mode
+        self.wall_force_mode = options.get('wall_force_mode', 'linear')
+        self.wall_range_frac = options.get('wall_range_frac', 0.05)
+
         # Pressure parameters
         self.lower_pressure_limit = options.get('lower_pressure_limit', 500)
         self.upper_pressure_limit = options.get('upper_pressure_limit', 1000)
@@ -167,6 +181,8 @@ class NBodyPhysicsEngine:
             print(f"  Slope Repulsion: {self.slope_repulsion}")
             print(f"  Magnitude Attraction: {self.mag_attraction}")
             print(f"  Force Cutoff Extra: {self.force_cutoff_extra}")
+        elif self.force_mode == "true_lj":
+            print(f"  LJ Strength: {self.lj_strength}")
         else:
             print(f"  P: {self.p}")
             print(f"  Q: {self.q}")
@@ -300,13 +316,21 @@ class NBodyPhysicsEngine:
 
             __syncthreads();
 
-            // Update positions and velocities. We update position first to utilize
-            // leap-frog integration.
+            // Leap-frog integration
             vel[idx].x += acc[idx].x * DT;
             vel[idx].y += acc[idx].y * DT;
 
-            shPos[idx].x += currentVel.x * DT;
-            shPos[idx].y += currentVel.y * DT;
+            // Velocity clamp
+            float speed = sqrtf(vel[idx].x*vel[idx].x + vel[idx].y*vel[idx].y);
+            float maxSpd = 5.0f;
+            if(speed > maxSpd) {
+                float s = maxSpd / speed;
+                vel[idx].x *= s;
+                vel[idx].y *= s;
+            }
+
+            shPos[idx].x += vel[idx].x * DT;
+            shPos[idx].y += vel[idx].y * DT;
         }
         """,
             "nBodyStepPiecewiseLJ",
@@ -437,15 +461,108 @@ class NBodyPhysicsEngine:
 
             __syncthreads();
 
-            // Update positions and velocities. We update position first to utilize
-            // leap-frog integration.
-            shPos[idx].x += currentVel.x * DT;
-            shPos[idx].y += currentVel.y * DT;
+            // Integration
             vel[idx].x += acc[idx].x * DT;
             vel[idx].y += acc[idx].y * DT;
+
+            // Velocity clamp
+            float speed = sqrtf(vel[idx].x*vel[idx].x + vel[idx].y*vel[idx].y);
+            float maxSpd = 5.0f;
+            if(speed > maxSpd) {
+                float s = maxSpd / speed;
+                vel[idx].x *= s;
+                vel[idx].y *= s;
+            }
+
+            shPos[idx].x += vel[idx].x * DT;
+            shPos[idx].y += vel[idx].y * DT;
         }
         """,
             "nBodyStepSmoothLJ",
+        )
+
+        # True Lennard-Jones kernel with per-pair sigma
+        self.nbody_true_lj_kernel = cp.RawKernel(
+            r"""
+        extern "C" __global__
+        void nBodyStepTrueLJ(float2* shPos, float2* vel, float2* acc,
+                              const float* pairSigma,
+                              float ljStrength,
+                              float iR, float oR, int N, float WALL_STRENGTH, float DAMP,
+                              float FORCE_CUTOFF, float MASS, float DT)
+        {
+            int idx = blockIdx.x * blockDim.x + threadIdx.x;
+            if(idx >= N) return;
+
+            float2 currentPos = shPos[idx];
+            float2 currentVel = vel[idx];
+            float2 force = make_float2(0.0f, 0.0f);
+
+            // N-body interactions (true Lennard-Jones 12-6)
+            for(int i = 0; i < N; i++)
+            {
+                if(i == idx) continue;
+
+                float2 diff = make_float2(shPos[i].x - currentPos.x,
+                                          shPos[i].y - currentPos.y);
+                float d = sqrtf(diff.x*diff.x + diff.y*diff.y);
+
+                float sigma = pairSigma[idx*N + i];
+                float cutoff = sigma * 2.5f;
+
+                if(d < cutoff && d > 0.01f)
+                {
+                    float r_inv = 1.0f / fmaxf(d, 0.01f);
+                    float sr = fminf(sigma * r_inv, 100.0f);  // clamp ratio
+                    float sr6 = sr * sr * sr * sr * sr * sr;
+                    float forceMag = 24.0f * ljStrength * r_inv * (2.0f * sr6 * sr6 - sr6);
+
+                    // Clamp force magnitude
+                    forceMag = fmaxf(-1000.0f, fminf(forceMag, 1000.0f));
+
+                    force.x += forceMag * diff.x / d;
+                    force.y += forceMag * diff.y / d;
+                }
+            }
+
+            __syncthreads();
+
+            // Wall forces
+            float radius = sqrtf(currentPos.x*currentPos.x + currentPos.y*currentPos.y);
+            if(radius < iR && radius > 1e-10f)
+            {
+                float forceMag = WALL_STRENGTH * (iR - radius);
+                force.x += forceMag * currentPos.x / radius;
+                force.y += forceMag * currentPos.y / radius;
+            }
+            else if(radius > oR && radius > 1e-10f)
+            {
+                float forceMag = WALL_STRENGTH * (oR - radius);
+                force.x += forceMag * currentPos.x / radius;
+                force.y += forceMag * currentPos.y / radius;
+            }
+
+            __syncthreads();
+
+            // Multiplicative damping integration (matches torus-style)
+            float dampFactor = fmaxf(0.01f, 1.0f - DAMP * DT);
+            vel[idx].x = (currentVel.x + force.x * DT / MASS) * dampFactor;
+            vel[idx].y = (currentVel.y + force.y * DT / MASS) * dampFactor;
+
+            // Velocity clamp
+            float speed = sqrtf(vel[idx].x*vel[idx].x + vel[idx].y*vel[idx].y);
+            float maxSpd = 5.0f;
+            if(speed > maxSpd) {
+                float s = maxSpd / speed;
+                vel[idx].x *= s;
+                vel[idx].y *= s;
+            }
+
+            shPos[idx].x += vel[idx].x * DT;
+            shPos[idx].y += vel[idx].y * DT;
+        }
+        """,
+            "nBodyStepTrueLJ",
         )
 
     def initialize_physics(self):
@@ -470,12 +587,24 @@ class NBodyPhysicsEngine:
         # perturbation = 1e-5 * self.xp.random.randn(self.n_cities, 2).astype(self.xp.float32)
         # self.pos += perturbation
 
+        # Compute per-pair sigma for true_lj mode
+        if self.force_mode == "true_lj":
+            self._compute_pair_sigma()
+
         print("Physics initialized: positions, velocities set")
+
+    def _compute_pair_sigma(self):
+        """Compute per-pair sigma = distance * 2^(-1/6) so initial config is at LJ minimum."""
+        xp = self.xp
+        sig_scale = 1.0 / (2.0 ** (1.0 / 6.0))
+        diff = self.coords[xp.newaxis, :, :] - self.coords[:, xp.newaxis, :]  # (N,N,2)
+        dist = xp.sqrt(xp.sum(diff * diff, axis=2))  # (N,N)
+        self.pair_sigma = (dist * sig_scale).astype(xp.float32)
 
     def compute_wall_forces_cpu(
         self, inner_radius: float, outer_radius: float
     ) -> np.ndarray:
-        """Calculate wall forces using CPU."""
+        """Calculate wall forces using CPU. Supports linear and inverse-square modes."""
         xp = self.xp
 
         dx = self.pos[:, 0]
@@ -484,21 +613,74 @@ class NBodyPhysicsEngine:
 
         force = xp.zeros_like(self.pos)
 
-        # Inner wall
-        inside_inner = radius < inner_radius
-        if xp.any(inside_inner):
-            force_mag = self.WALL_STRENGTH * (inner_radius - radius[inside_inner])
-            safe_radius = xp.maximum(radius[inside_inner], 1e-10)
-            force[inside_inner, 0] = force_mag * dx[inside_inner] / safe_radius
-            force[inside_inner, 1] = force_mag * dy[inside_inner] / safe_radius
+        if self.wall_force_mode == 'inverse_square':
+            # Inverse-square wall force within a thin boundary zone
+            wall_gap = outer_radius - inner_radius
+            wall_range = wall_gap * self.wall_range_frac
 
-        # Outer wall
-        outside_outer = radius > outer_radius
-        if xp.any(outside_outer):
-            force_mag = self.WALL_STRENGTH * (outer_radius - radius[outside_outer])
-            safe_radius = xp.maximum(radius[outside_outer], 1e-10)
-            force[outside_outer, 0] = force_mag * dx[outside_outer] / safe_radius
-            force[outside_outer, 1] = force_mag * dy[outside_outer] / safe_radius
+            # Inner wall: particles inside inner_radius get pushed outward
+            if inner_radius > 0.001:
+                inner_dist = radius - inner_radius  # positive = outside (safe)
+                near_inner = (inner_dist < wall_range) & (inner_dist > 0) & (radius > 1e-10)
+                if xp.any(near_inner):
+                    t = xp.maximum(0.001, inner_dist[near_inner] / wall_range)
+                    f_mag = self.WALL_STRENGTH / (t * t)
+                    safe_r = xp.maximum(radius[near_inner], 1e-10)
+                    force[near_inner, 0] += f_mag * dx[near_inner] / safe_r
+                    force[near_inner, 1] += f_mag * dy[near_inner] / safe_r
+
+                # Hard constraint: clamp particles inside inner wall
+                inside = radius < inner_radius
+                if xp.any(inside):
+                    safe_r = xp.maximum(radius[inside], 1e-10)
+                    norm_x = dx[inside] / safe_r
+                    norm_y = dy[inside] / safe_r
+                    self.pos[inside, 0] = norm_x * (inner_radius + 0.01)
+                    self.pos[inside, 1] = norm_y * (inner_radius + 0.01)
+                    # Reflect velocity outward and damp
+                    vn = self.vel[inside, 0] * norm_x + self.vel[inside, 1] * norm_y
+                    self.vel[inside, 0] = (self.vel[inside, 0] - 2.0 * vn * norm_x) * 0.7
+                    self.vel[inside, 1] = (self.vel[inside, 1] - 2.0 * vn * norm_y) * 0.7
+
+            # Outer wall: particles near outer_radius get pushed inward
+            outer_dist = outer_radius - radius  # positive = inside (safe)
+            near_outer = (outer_dist < wall_range) & (outer_dist > 0) & (radius > 1e-10)
+            if xp.any(near_outer):
+                t = xp.maximum(0.001, outer_dist[near_outer] / wall_range)
+                f_mag = -self.WALL_STRENGTH / (t * t)
+                safe_r = xp.maximum(radius[near_outer], 1e-10)
+                force[near_outer, 0] += f_mag * dx[near_outer] / safe_r
+                force[near_outer, 1] += f_mag * dy[near_outer] / safe_r
+
+            # Hard constraint: clamp particles outside outer wall
+            outside = radius > outer_radius
+            if xp.any(outside):
+                safe_r = xp.maximum(radius[outside], 1e-10)
+                norm_x = dx[outside] / safe_r
+                norm_y = dy[outside] / safe_r
+                self.pos[outside, 0] = norm_x * (outer_radius - 0.01)
+                self.pos[outside, 1] = norm_y * (outer_radius - 0.01)
+                vn = self.vel[outside, 0] * norm_x + self.vel[outside, 1] * norm_y
+                self.vel[outside, 0] = (self.vel[outside, 0] - 2.0 * vn * norm_x) * 0.7
+                self.vel[outside, 1] = (self.vel[outside, 1] - 2.0 * vn * norm_y) * 0.7
+
+        else:
+            # Original linear spring wall force
+            # Inner wall
+            inside_inner = radius < inner_radius
+            if xp.any(inside_inner):
+                force_mag = self.WALL_STRENGTH * (inner_radius - radius[inside_inner])
+                safe_radius = xp.maximum(radius[inside_inner], 1e-10)
+                force[inside_inner, 0] = force_mag * dx[inside_inner] / safe_radius
+                force[inside_inner, 1] = force_mag * dy[inside_inner] / safe_radius
+
+            # Outer wall
+            outside_outer = radius > outer_radius
+            if xp.any(outside_outer):
+                force_mag = self.WALL_STRENGTH * (outer_radius - radius[outside_outer])
+                safe_radius = xp.maximum(radius[outside_outer], 1e-10)
+                force[outside_outer, 0] = force_mag * dx[outside_outer] / safe_radius
+                force[outside_outer, 1] = force_mag * dy[outside_outer] / safe_radius
 
         return force
 
@@ -605,7 +787,29 @@ class NBodyPhysicsEngine:
         # Use reduced wall strength if improved walls are enabled
         wall_strength = self.WALL_STRENGTH
 
-        if self.force_mode == "smooth":
+        if self.force_mode == "true_lj":
+            # True Lennard-Jones kernel with per-pair sigma
+            pair_sigma_gpu = self.pair_sigma if isinstance(self.pair_sigma, cp.ndarray) else cp.asarray(self.pair_sigma)
+            self.nbody_true_lj_kernel(
+                (blocks,),
+                (threads_per_block,),
+                (
+                    pos_f2,
+                    vel_f2,
+                    acc_f2,
+                    pair_sigma_gpu.ravel(),
+                    cp.float32(self.lj_strength),
+                    cp.float32(inner_radius),
+                    cp.float32(outer_radius),
+                    cp.int32(self.n_cities),
+                    cp.float32(wall_strength),
+                    cp.float32(self.DAMP),
+                    cp.float32(self.FORCE_CUTOFF),
+                    cp.float32(self.MASS),
+                    cp.float32(self.DT)
+                ),
+            )
+        elif self.force_mode == "smooth":
             # Smooth Lennard-Jones kernel
             self.nbody_smooth_lj_kernel(
                 (blocks,),
@@ -655,62 +859,57 @@ class NBodyPhysicsEngine:
             )
 
     def integrate_step_tsp_cpu(self, inner_radius: float, outer_radius: float):
-        """Perform TSP integration using CPU."""
+        """Perform TSP integration using CPU — fully vectorized with NumPy."""
         xp = self.xp
         n = self.n_cities
 
-        force = xp.zeros_like(self.pos)
+        # === Pairwise differences: diff[i,j] = pos[j] - pos[i], shape (N,N,2) ===
+        diff = self.pos[xp.newaxis, :, :] - self.pos[:, xp.newaxis, :]  # (N,N,2)
+        dist = xp.sqrt(xp.sum(diff * diff, axis=2))  # (N,N)
+        dist_safe = xp.maximum(dist, 1e-10)
 
-        if self.force_mode == "smooth":
-            # Smooth Lennard-Jones implementation
-            for i in range(n):
-                for j in range(n):
-                    if i == j:
-                        continue
+        # Initial pairwise distances (equilibrium lengths)
+        init_diff = self.coords[xp.newaxis, :, :] - self.coords[:, xp.newaxis, :]
+        eq_len = xp.sqrt(xp.sum(init_diff * init_diff, axis=2))  # (N,N)
+        eq_len_safe = xp.maximum(eq_len, 1e-10)
 
-                    # Current distance
-                    diff = self.pos[j] - self.pos[i]
-                    d = xp.linalg.norm(diff)
-                    d = max(d, 1e-10)
-
-                    # Initial distance (equilibrium length)
-                    init_diff = self.coords[j] - self.coords[i]
-                    l = xp.linalg.norm(init_diff)
-
-                    # Smooth Lennard-Jones force calculation
-                    h = self.m * ( ( (self.q / self.p) ** (1.0 / (self.q - self.p)) * l ) ** self.p ) / (1.0 - self.p / self.q)
-                    c = (l / d) ** (self.q - self.p)
-                    force_mag = (c - 1) * h / (d ** self.p)
-
-                    force[i] += force_mag * diff / d
+        if self.force_mode == "true_lj":
+            # True Lennard-Jones 12-6 with per-pair sigma calibration
+            # F = 24 * eps / d * (2*(sigma/d)^12 - (sigma/d)^6)
+            sigma = self.pair_sigma  # (N,N) precomputed
+            cutoff = sigma * 2.5
+            # Clamp sr ratio to avoid overflow in sr^12
+            sr = xp.minimum(sigma / dist_safe, 100.0)
+            sr6 = sr ** 6
+            force_mag = 24.0 * self.lj_strength / dist_safe * (2.0 * sr6 * sr6 - sr6)
+            # Clamp force magnitude to prevent explosion
+            force_mag = xp.clip(force_mag, -1000.0, 1000.0)
+            # Mask: only within cutoff, not self, not too close
+            mask = (dist > 0.01) & (dist < cutoff)
+            xp.fill_diagonal(mask, False)
+            force_mag = xp.where(mask, force_mag, 0.0)
+        elif self.force_mode == "smooth":
+            # Smooth LJ: h = m * ((q/p)^(1/(q-p)) * L)^p / (1 - p/q)
+            # force_mag = ((L/d)^(q-p) - 1) * h / d^p
+            h = self.m * ((self.q / self.p) ** (1.0 / (self.q - self.p)) * eq_len_safe) ** self.p / (1.0 - self.p / self.q)
+            c = (eq_len_safe / dist_safe) ** (self.q - self.p)
+            force_mag = (c - 1) * h / (dist_safe ** self.p)
         else:
-            # Piecewise Lennard-Jones implementation
-            for i in range(n):
-                for j in range(n):
-                    if i == j:
-                        continue
+            # Piecewise LJ
+            force_mag = xp.zeros((n, n), dtype=xp.float32)
+            # Compressed: d <= L -> repulsive
+            compressed = dist_safe <= eq_len
+            force_mag[compressed] = -(eq_len[compressed] - dist_safe[compressed]) * self.slope_repulsion
+            # Extended: L < d < cutoff -> attractive
+            extended = (dist_safe > eq_len) & (dist_safe < self.force_cutoff_extra)
+            force_mag[extended] = self.mag_attraction / eq_len_safe[extended]
 
-                    # Current distance
-                    diff = self.pos[j] - self.pos[i]
-                    d = xp.linalg.norm(diff)
-                    d = max(d, 1e-10)
+        # Zero diagonal (no self-interaction)
+        xp.fill_diagonal(force_mag, 0.0)
 
-                    # Initial distance (equilibrium length)
-                    init_diff = self.coords[j] - self.coords[i]
-                    l = xp.linalg.norm(init_diff)
-
-                    # Piecewise force calculation
-                    if d <= l:
-                        # Compressed: linear repulsive force
-                        force_mag = -(l - d) * self.slope_repulsion
-                    elif d < self.force_cutoff_extra:
-                        # Extended: weak attractive force
-                        force_mag = self.mag_attraction / l
-                    else:
-                        # Beyond cutoff
-                        force_mag = 0.0
-
-                    force[i] += force_mag * diff / d
+        # Direction unit vectors and sum forces
+        direction = diff / dist_safe[:, :, xp.newaxis]  # (N,N,2)
+        force = xp.sum(force_mag[:, :, xp.newaxis] * direction, axis=1)  # (N,2)
 
         force += self.compute_wall_forces_cpu(inner_radius, outer_radius)
 
@@ -718,18 +917,27 @@ class NBodyPhysicsEngine:
         if self.use_bubbles:
             force += self.adaptive_bubbles.compute_forces(self.pos)
 
-        # Damping
-        force += self.compute_damping_forces()
-
-        # Force cutoff
-        force[force > self.FORCE_CUTOFF] = 0.0
-
-        # Compute acceleration
-        self.acc = force / self.MASS
-
-        # Velocity Verlet integration
-        self.vel += self.acc * self.DT
-        self.pos += self.vel * self.DT
+        if self.force_mode == "true_lj" or self.wall_force_mode == "inverse_square":
+            # Torus-style integration: multiplicative damping + velocity clamp
+            damping_factor = max(0.01, 1.0 - self.DAMP * self.DT)
+            # Sanitize force (NaN/Inf -> 0)
+            force = xp.nan_to_num(force, nan=0.0, posinf=0.0, neginf=0.0)
+            self.vel = (self.vel + force * self.DT / self.MASS) * damping_factor
+            # Sanitize velocity
+            self.vel = xp.nan_to_num(self.vel, nan=0.0, posinf=0.0, neginf=0.0)
+            speed = xp.sqrt(xp.sum(self.vel * self.vel, axis=1))
+            max_speed = 5.0
+            too_fast = speed > max_speed
+            if xp.any(too_fast):
+                self.vel[too_fast] *= (max_speed / speed[too_fast])[:, xp.newaxis]
+            self.pos += self.vel * self.DT
+        else:
+            # Original integration: force-based damping + force cutoff
+            force += self.compute_damping_forces()
+            force[force > self.FORCE_CUTOFF] = 0.0
+            self.acc = force / self.MASS
+            self.vel += self.acc * self.DT
+            self.pos += self.vel * self.DT
 
     def integrate_step(
         self,

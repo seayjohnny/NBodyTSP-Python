@@ -9,6 +9,8 @@ import numpy as np
 from typing import Optional, Tuple, TypedDict, TypeAlias
 import sys
 
+TAU = 2.0 * np.pi
+
 try:
     from OpenGL.GL import *
     from OpenGL.GLU import *
@@ -57,6 +59,7 @@ class RendererOptions(TypedDict, total=False):
     color_text: ColorType
     record_video: bool
     video_fps: int
+    panel_width: int  # Width of UI control panel (0 = no panel)
 
 
 default_renderer_options: RendererOptions = {
@@ -81,6 +84,7 @@ default_renderer_options: RendererOptions = {
     "color_text": (1.0, 1.0, 1.0),
     "record_video": False,
     "video_fps": 30,
+    "panel_width": 0,
 }
 
 
@@ -132,6 +136,11 @@ class TSPRenderer:
         # Per-city colors (will be set when number of cities is known)
         self.city_colors = None
 
+        # UI panel support
+        self.panel_width = options.get("panel_width", 0)
+        self.control_panel = None  # Set externally if using UI controls
+        self.gl_viewport_size = self.window_size  # OpenGL viewport (may differ from window)
+
         if not OPENGL_AVAILABLE:
             print("Renderer created but OpenGL not available")
     
@@ -149,16 +158,21 @@ class TSPRenderer:
         try:
             # Initialize Pygame
             pygame.init()
-            
+
+            # If a panel is present, widen the window to accommodate it
+            sim_w, sim_h = self.window_size
+            total_w = sim_w + self.panel_width
+            self.gl_viewport_size = (sim_w, sim_h)
+
             # Set up display with OpenGL
-            self.window = pygame.display.set_mode(self.window_size, DOUBLEBUF | OPENGL)
+            self.window = pygame.display.set_mode((total_w, sim_h), DOUBLEBUF | OPENGL)
             pygame.display.set_caption(self.title)
-            
+
             # Initialize clock for frame timing
             self.clock = pygame.time.Clock()
-            
-            # Set up OpenGL viewport
-            glViewport(0, 0, self.window_size[0], self.window_size[1])
+
+            # Set up OpenGL viewport (only the simulation area, not the panel)
+            glViewport(0, 0, sim_w, sim_h)
 
             # Set up 2D orthographic projection with padding
             self.setup_padded_projection()
@@ -752,6 +766,9 @@ class TSPRenderer:
         # Draw pause indicator if paused
         self.draw_pause_indicator()
 
+        # Draw UI control panel if present
+        self.draw_panel()
+
         self.swap_buffers()
     
     def swap_buffers(self):
@@ -954,6 +971,118 @@ class TSPRenderer:
             print("Window focused")
         except Exception as e:
             print(f"Failed to focus window: {e}")
+
+    def draw_torus_circle(self, R: float, r: float, outer_radius: float,
+                          segments: int = 100, width: float = 2.0):
+        """
+        Draw the major circle and tube boundary for torus mode.
+
+        Args:
+            R: Major circle radius (normalized)
+            r: Tube radius (normalized)
+            outer_radius: Normalization factor (OUTER radius)
+            segments: Number of line segments
+            width: Line width
+        """
+        if not self.is_initialized:
+            return
+
+        R_n = R / outer_radius if outer_radius > 0 else R
+        r_n = r / outer_radius if outer_radius > 0 else r
+
+        # Outer boundary of torus (major circle + tube radius) - this is the "wall"
+        glLineWidth(width)
+        glColor3f(0.4, 0.35, 0.3)  # Muted brown
+        glBegin(GL_LINE_LOOP)
+        for i in range(segments):
+            theta = TAU * i / segments
+            x = (R_n + r_n) * np.cos(theta)
+            y = (R_n + r_n) * np.sin(theta)
+            glVertex2f(x, y)
+        glEnd()
+
+        # Inner hole of torus (major circle - tube radius)
+        inner_hole = R_n - r_n
+        if inner_hole > 0.01:
+            glColor3f(0.3, 0.3, 0.5)  # Muted blue
+            glBegin(GL_LINE_LOOP)
+            for i in range(segments):
+                theta = TAU * i / segments
+                x = inner_hole * np.cos(theta)
+                y = inner_hole * np.sin(theta)
+                glVertex2f(x, y)
+            glEnd()
+
+        # Major circle (centerline of tube)
+        glColor4f(0.5, 0.5, 0.5, 0.3)
+        glLineWidth(1.0)
+        glBegin(GL_LINE_LOOP)
+        for i in range(segments):
+            theta = TAU * i / segments
+            x = R_n * np.cos(theta)
+            y = R_n * np.sin(theta)
+            glVertex2f(x, y)
+        glEnd()
+
+    def draw_panel(self):
+        """Blit the UI control panel surface onto the right side of the window."""
+        if not self.is_initialized or self.control_panel is None:
+            return
+        if self.panel_width <= 0:
+            return
+
+        panel_surface = self.control_panel.draw()
+        sim_w, sim_h = self.gl_viewport_size
+        pw, ph = panel_surface.get_size()
+
+        # Upload surface to texture
+        tex_data = pygame.image.tostring(panel_surface, "RGBA", True)
+        tex_id = glGenTextures(1)
+        glBindTexture(GL_TEXTURE_2D, tex_id)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, pw, ph, 0,
+                     GL_RGBA, GL_UNSIGNED_BYTE, tex_data)
+
+        # Set viewport to panel area
+        glViewport(sim_w, 0, self.panel_width, sim_h)
+
+        glMatrixMode(GL_PROJECTION)
+        glPushMatrix()
+        glLoadIdentity()
+        glOrtho(0, pw, ph, 0, -1, 1)
+        glMatrixMode(GL_MODELVIEW)
+        glPushMatrix()
+        glLoadIdentity()
+
+        glDisable(GL_DEPTH_TEST)
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        glColor4f(1, 1, 1, 1)
+
+        # Draw textured quad
+        glEnable(GL_TEXTURE_2D)
+        glBindTexture(GL_TEXTURE_2D, tex_id)
+        glBegin(GL_QUADS)
+        glTexCoord2f(0, 0); glVertex2f(0, ph)
+        glTexCoord2f(1, 0); glVertex2f(pw, ph)
+        glTexCoord2f(1, 1); glVertex2f(pw, 0)
+        glTexCoord2f(0, 1); glVertex2f(0, 0)
+        glEnd()
+        glDisable(GL_TEXTURE_2D)
+
+        glEnable(GL_DEPTH_TEST)
+
+        # Restore
+        glPopMatrix()
+        glMatrixMode(GL_PROJECTION)
+        glPopMatrix()
+        glMatrixMode(GL_MODELVIEW)
+
+        glDeleteTextures([tex_id])
+
+        # Restore viewport to simulation area
+        glViewport(0, 0, sim_w, sim_h)
 
     def close(self):
         """Clean up and close the window."""

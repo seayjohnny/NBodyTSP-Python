@@ -158,7 +158,7 @@ class TSPDataLoader:
         distances = np.sqrt(np.sum(self.coords ** 2, axis=1))
         max_radius = np.max(distances)
         
-        print(f"Bounding circle radius: {max_radius:.4f}")
+        # print(f"Bounding circle radius: {max_radius:.4f}")
         return max_radius
     
     def get_bounding_box(self) -> Tuple[float, float, float, float]:
@@ -380,6 +380,48 @@ def generate_random_dataset(
             f.write(f"{coord[0]} {coord[1]}\n")
     
     return coords
+
+
+def discover_datasets(datasets_dir: str = "datasets") -> list[dict]:
+    """
+    Scan a directory for TSP dataset subdirectories containing coords.txt.
+
+    Returns:
+        List of dicts with keys: name, path, n_cities, has_optimal
+    """
+    results = []
+    datasets_path = Path(datasets_dir)
+    if not datasets_path.exists():
+        return results
+
+    for d in sorted(datasets_path.iterdir()):
+        if not d.is_dir():
+            continue
+        coords_file = d / "coords.txt"
+        if not coords_file.exists():
+            continue
+
+        # Count cities
+        n = 0
+        try:
+            with open(coords_file) as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith('#'):
+                        n += 1
+        except Exception:
+            continue
+
+        has_optimal = (d / "tour_len.txt").exists()
+
+        results.append({
+            "name": d.name,
+            "path": str(coords_file),
+            "n_cities": n,
+            "has_optimal": has_optimal,
+        })
+
+    return results
 
 
 # Example usage

@@ -28,6 +28,11 @@ from tsp_nbody.dataio import TSPDataLoader, load_optimal_cost
 from tsp_nbody.physics_engine import NBodyPhysicsEngine, NBodyPhysicsOptions, default_nbody_options
 from tsp_nbody.path_extraction import PathExtractor, random_nearest_neighbor_tsp, brute_force_tsp
 from tsp_nbody.renderer import TSPRenderer, RendererOptions, default_renderer_options, OPENGL_AVAILABLE
+from tsp_nbody.torus_physics import TorusPhysicsEngine, TorusPhysicsOptions, default_torus_options
+from tsp_nbody.torus_renderer import TorusRenderer
+from tsp_nbody.local_search import improve as local_search_improve, make_euclidean_dist_fn
+from tsp_nbody.optimizer import BayesianOptimizer
+from tsp_nbody.ui_controls import ControlPanel, PANEL_WIDTH
 
 class SimulatorOptions(TypedDict, total=False):
     """Typed dictionary for simulator options."""
@@ -39,6 +44,15 @@ class SimulatorOptions(TypedDict, total=False):
     use_density_grid: bool
     use_bubbles: bool  # Requires density grid to be enabled
     run_brute_force: bool  # For small datasets only
+
+    # Mode selection
+    mode: str  # "2d" or "torus"
+
+    # Torus mode options
+    substeps: int  # Physics substeps per render frame
+    use_local_search: bool
+    local_search_mode: str  # "2-opt", "3-opt", or "both"
+    show_ui_panel: bool  # Show interactive control panel
 
     # Rendering options
     draw: bool
@@ -65,6 +79,11 @@ default_simulator_options: SimulatorOptions = {
     "use_density_grid": False,
     "use_bubbles": False,
     "run_brute_force": False,
+    "mode": "2d",
+    "substeps": 4,
+    "use_local_search": False,
+    "local_search_mode": "2-opt",
+    "show_ui_panel": False,
     "draw": True,
     "render_frequency": 10,
     "pause_initial": True,
@@ -168,6 +187,22 @@ class TSPNBodySimulator:
 
         # Bubble mode selection
         self.use_dynamic_bubbles = False
+
+        # Torus mode
+        self.mode = self.options.get("mode", "2d")
+        self.torus_engine = None
+        self.torus_renderer = None  # 3D renderer for torus mode
+        self.torus_options: TorusPhysicsOptions = default_torus_options.copy()
+        if nbody_options:
+            # Map relevant nbody options to torus options
+            for key in ('shrink_rate', 'epsilon', 'lj_strength', 'perturbation',
+                        'dt', 'damping', 'embed_mode', 'outer_radius'):
+                if key in nbody_options:
+                    self.torus_options[key] = nbody_options[key]
+
+        # UI controls
+        self.control_panel = None
+        self.substeps = self.options.get("substeps", 4)
 
         self.results = {}
 
@@ -401,6 +436,9 @@ class TSPNBodySimulator:
 
         # Draw pause indicator if paused
         self.renderer.draw_pause_indicator()
+
+        # Draw UI panel
+        self.renderer.draw_panel()
 
     def render_frame_with_manual_bubbles(self):
         """Render initial frame with manual bubble placement overlays."""
@@ -922,6 +960,412 @@ class TSPNBodySimulator:
 
         print(f"Simulator options saved to: {output_path}")
 
+    def initialize_torus(self) -> bool:
+        """Initialize for torus mode simulation."""
+        try:
+            print("\n" + "=" * 60)
+            print("INITIALIZING TORUS N-BODY TSP SIMULATOR")
+            print("=" * 60)
+
+            # Load and preprocess data
+            print("\n[1/3] Loading data...")
+            stats = self.data_loader.preprocess(normalize_method="minimum")
+            self.coords = self.data_loader.coords
+            self.n_cities = self.data_loader.n_cities
+
+            # Initialize torus physics engine
+            print("\n[2/3] Initializing torus physics engine...")
+            self.torus_options['use_gpu'] = self.options.get('use_gpu', False) and True
+            self.torus_engine = TorusPhysicsEngine(
+                self.data_loader.original_coords,
+                options=self.torus_options
+            )
+            self.torus_engine.initialize_physics()
+
+            # Initialize 3D renderer
+            print("\n[3/3] Initializing 3D renderer...")
+            show_panel = self.options.get("show_ui_panel", False)
+            panel_w = PANEL_WIDTH if show_panel else 0
+
+            if self.options["draw"] and OPENGL_AVAILABLE:
+                sim_size = self.renderer_options.get("window_size", (800, 800))
+                self.torus_renderer = TorusRenderer(
+                    sim_size=sim_size,
+                    panel_width=panel_w,
+                    title=self.renderer_options.get("title", "N-Body TSP · Torus Collapse"),
+                )
+                if not self.torus_renderer.initialize():
+                    print("Warning: 3D renderer init failed, continuing without visualization")
+                    self.torus_renderer = None
+                else:
+                    # Setup UI panel
+                    if show_panel:
+                        self.control_panel = ControlPanel(PANEL_WIDTH, mode="torus", panel_height=sim_size[1])
+                        self.torus_renderer.control_panel = self.control_panel
+
+                        self.control_panel.set_slider_value('shrink_rate', self.torus_engine.shrink_rate)
+                        self.control_panel.set_slider_value('epsilon', self.torus_engine.epsilon)
+                        self.control_panel.set_slider_value('lj_strength', self.torus_engine.lj_strength)
+                        self.control_panel.set_slider_value('perturbation', self.torus_engine.perturbation)
+                        self.control_panel.set_slider_value('speed', self.substeps)
+            else:
+                print("Rendering disabled or OpenGL not available")
+
+            # Load optimal cost
+            if self.coord_file:
+                dataset_dir = self.coord_file.parent
+                opt_cost_file = dataset_dir / "tour_len.txt"
+                self.optimal_cost = load_optimal_cost(str(opt_cost_file))
+                if self.optimal_cost:
+                    print(f"Optimal cost: {self.optimal_cost:.4f}")
+
+            self.is_initialized = True
+            print("\n" + "=" * 60)
+            print("TORUS INITIALIZATION COMPLETE")
+            print("=" * 60 + "\n")
+            return True
+
+        except Exception as e:
+            print(f"Torus initialization failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
+    def run_torus_simulation(self) -> Tuple[np.ndarray, float]:
+        """
+        Run the torus collapse simulation with 3D rendering.
+
+        Returns:
+            Tuple of (path, cost)
+        """
+        if not self.is_initialized:
+            raise RuntimeError("Simulator not initialized.")
+
+        print("\n" + "=" * 60)
+        print("RUNNING TORUS COLLAPSE SIMULATION")
+        print("=" * 60)
+
+        self.start_time = time.perf_counter()
+        engine = self.torus_engine
+        tr = self.torus_renderer  # 3D renderer (may be None if draw=False)
+
+        # Build particle ID list
+        particle_ids = list(range(1, self.n_cities + 1))
+
+        # Show initial state and wait for SPACE or COLLAPSE button
+        if tr:
+            self._render_torus_frame_3d()
+
+            if self.options["pause_initial"]:
+                print("Press SPACE or click COLLAPSE to start (drag to orbit, scroll to zoom)...")
+                waiting = True
+                while waiting:
+                    # Process events manually so SPACE triggers collapse
+                    for event in pygame.event.get():
+                        if event.type == pygame.QUIT:
+                            raise KeyboardInterrupt
+                        if event.type == pygame.KEYDOWN:
+                            if event.key == pygame.K_ESCAPE:
+                                raise KeyboardInterrupt
+                            if event.key == pygame.K_SPACE:
+                                waiting = False
+                                continue
+                            if event.key == pygame.K_l:
+                                tr.show_labels = not tr.show_labels
+
+                        # Camera controls
+                        if event.type == pygame.MOUSEBUTTONDOWN:
+                            mx, my = event.pos
+                            if mx < tr.sim_size[0]:
+                                if event.button == 1:
+                                    tr.is_dragging = True
+                                    tr.last_mx = mx
+                                    tr.last_my = my
+                        if event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+                            tr.is_dragging = False
+                        if event.type == pygame.MOUSEMOTION and tr.is_dragging:
+                            mx, my = event.pos
+                            tr.cam_angle += (mx - tr.last_mx) * 0.005
+                            tr.cam_pitch += (my - tr.last_my) * 0.005
+                            tr.cam_pitch = max(-1.2, min(1.2, tr.cam_pitch))
+                            tr.last_mx = mx
+                            tr.last_my = my
+                        if event.type == pygame.MOUSEWHEEL:
+                            tr.cam_dist = max(3.0, min(18.0, tr.cam_dist - event.y * 0.5))
+
+                        # Panel events
+                        if self.control_panel and tr.panel_width > 0:
+                            changes = self.control_panel.handle_event(event, tr.sim_size[0])
+                            self._apply_panel_changes(changes)
+                            if 'collapse' in changes:
+                                waiting = False
+
+                    self._render_torus_frame_3d()
+                    pygame.time.wait(10)
+
+        # Start collapse
+        engine.start_collapse()
+        print("Torus collapse started...")
+
+        frame_count = 0
+        fps_timer = time.perf_counter()
+        fps_count = 0
+        current_fps = 0
+
+        # Main simulation loop
+        while True:
+            # Handle events
+            if tr:
+                if not tr.handle_events():
+                    raise KeyboardInterrupt
+                self._apply_panel_changes(tr.last_panel_changes)
+
+                if tr.is_paused:
+                    self._render_torus_frame_3d()
+                    pygame.time.wait(16)
+                    continue
+
+            # Run physics substeps
+            engine.run_substeps(self.substeps)
+
+            # Render
+            if tr and frame_count % self.options["render_frequency"] == 0:
+                self._render_torus_frame_3d()
+
+                # FPS tracking
+                fps_count += 1
+                now = time.perf_counter()
+                if now - fps_timer > 0.5:
+                    current_fps = int(fps_count / (now - fps_timer))
+                    fps_timer = now
+                    fps_count = 0
+
+                # Update UI stats
+                if self.control_panel:
+                    extra = {}
+                    if engine.found_tour:
+                        original_coords = self.data_loader.original_coords
+                        dist_fn = make_euclidean_dist_fn(original_coords)
+                        from tsp_nbody.local_search import tour_distance
+                        td = tour_distance(engine.found_tour, dist_fn)
+                        extra['tour_dist'] = f"{td:,.0f}"
+                        if self.optimal_cost:
+                            gap = (td - self.optimal_cost) / self.optimal_cost * 100
+                            extra['gap'] = f"{gap:.1f}%"
+                    self.control_panel.update_stats(
+                        engine.r, engine.R, engine.phase, current_fps, **extra
+                    )
+
+            frame_count += 1
+
+            # Exit conditions
+            if engine.circle_phase and engine.time > 5.0:
+                break
+            if not engine.collapsing and not engine.circle_phase:
+                # Not started yet (shouldn't happen but safety)
+                continue
+
+        self.end_time = time.perf_counter()
+        self.elapsed_time = self.end_time - self.start_time
+        print(f"\nCollapse complete in {self.elapsed_time:.2f}s")
+
+        # Extract tour
+        original_coords = self.data_loader.original_coords
+        tour_1indexed = engine.get_found_tour()
+        if tour_1indexed is None:
+            tour_0indexed = engine.get_final_tour()
+            tour_1indexed = [int(i + 1) for i in tour_0indexed]
+
+        # Apply local search
+        if self.options.get("use_local_search", False):
+            dist_fn = make_euclidean_dist_fn(original_coords)
+            ls_mode = self.options.get("local_search_mode", "2-opt")
+            print(f"Applying {ls_mode} local search...")
+            ls_result = local_search_improve(tour_1indexed, dist_fn, mode=ls_mode)
+            tour_1indexed = ls_result["tour"]
+            if ls_result["saved"] > 0:
+                print(f"  Local search improved by {ls_result['pct_improved']:.1f}%")
+
+        # Convert to 0-indexed
+        tour_0indexed = [i - 1 for i in tour_1indexed]
+        self.final_path = np.array(tour_0indexed)
+        self.final_cost = self.path_extractor.calculate_path_cost(
+            original_coords, self.final_path
+        )
+
+        # Show final state and wait
+        if tr:
+            self._render_torus_frame_3d()
+            if self.options["pause_initial"]:
+                print(f"Tour cost: {self.final_cost:.2f} — press any key to continue...")
+                waiting = True
+                while waiting:
+                    for event in pygame.event.get():
+                        if event.type in (pygame.QUIT, pygame.KEYDOWN):
+                            waiting = False
+                    if tr:
+                        tr.handle_events()
+                        self._render_torus_frame_3d()
+                    pygame.time.wait(16)
+
+        # Comparisons
+        if self.compare_optimal and self.optimal_cost:
+            self.optimal_comparison = self.path_extractor.compare_with_optimal(
+                self.final_cost, self.optimal_cost
+            )
+
+        if self.compare_nearest_neighbor:
+            self.nn_results = random_nearest_neighbor_tsp(
+                original_coords, num_samples=len(original_coords)
+            )
+            best_nn_cost = self.nn_results['best']['cost']
+            if self.optimal_cost:
+                self.best_nn_comparison = self.path_extractor.compare_with_optimal(
+                    best_nn_cost, self.optimal_cost
+                )
+
+        if self.should_print_results:
+            self.print_results()
+
+        self.results['final_path'] = self.final_path
+        self.results['final_cost'] = self.final_cost
+        return self.final_path, self.final_cost
+
+    def _render_torus_frame_3d(self):
+        """Render one frame using the 3D torus renderer."""
+        tr = self.torus_renderer
+        if not tr or not tr.is_initialized:
+            return
+
+        engine = self.torus_engine
+        pos = engine.get_positions_cpu()
+        vel = engine.get_velocities_cpu()
+        particle_ids = list(range(1, self.n_cities + 1))
+
+        tr.render(
+            particles_pos=pos,
+            particles_vel=vel,
+            R=engine.R,
+            r=engine.r,
+            r0=engine.r0,
+            circle_phase=engine.circle_phase,
+            found_tour=engine.found_tour,
+            particle_ids=particle_ids,
+        )
+
+    def _apply_panel_changes(self, changes: dict):
+        """Apply UI panel changes to the torus engine."""
+        engine = self.torus_engine
+        if not engine:
+            return
+
+        for key, value in changes.items():
+            if key == 'shrink_rate':
+                engine.shrink_rate = value
+            elif key == 'epsilon':
+                engine.epsilon = value
+            elif key == 'lj_strength':
+                engine.lj_strength = value
+            elif key == 'perturbation':
+                engine.perturbation = value
+            elif key == 'speed':
+                self.substeps = int(value)
+            elif key == 'collapse':
+                if not engine.collapsed:
+                    engine.start_collapse()
+            elif key == 'reset':
+                engine.initialize_physics()
+            elif key == 'optimize':
+                print("Optimization triggered from UI (run run_optimization() separately)")
+            elif key == 'embed_mode':
+                engine.embed_mode = value
+                if not engine.collapsing:
+                    engine.initialize_physics()
+            elif key == 'local_search':
+                self.options['use_local_search'] = value
+
+    def run_optimization(self, max_trials: int = 60) -> dict:
+        """
+        Run Bayesian optimization to find best torus parameters.
+
+        Args:
+            max_trials: Maximum number of optimization trials
+
+        Returns:
+            dict with best_params, best_cost, best_tour, all_trials
+        """
+        print("\nStarting Bayesian optimization...")
+
+        original_coords = self.data_loader.original_coords
+        dist_fn = make_euclidean_dist_fn(original_coords)
+
+        def run_trial(config: dict) -> Tuple[float, Optional[list]]:
+            """Run a single torus simulation trial."""
+            trial_opts = self.torus_options.copy()
+            trial_opts['shrink_rate'] = config['shrink_rate']
+            trial_opts['lj_strength'] = config['lj_strength']
+            trial_opts['perturbation'] = config['perturbation']
+            trial_opts['epsilon'] = config['epsilon']
+
+            trial_engine = TorusPhysicsEngine(original_coords, options=trial_opts)
+            trial_engine.initialize_physics(seed=config['seed'])
+            trial_engine.start_collapse()
+
+            # Run until collapse + circle phase settling
+            max_steps = 50000
+            step = 0
+            while step < max_steps:
+                trial_engine.integrate_step()
+                step += 1
+                if trial_engine.circle_phase and trial_engine.time > 2.0:
+                    break
+
+            tour = trial_engine.get_found_tour()
+            if tour is None:
+                tour_0 = trial_engine.get_final_tour()
+                tour = [int(i + 1) for i in tour_0]
+
+            # Apply local search
+            if self.options.get("use_local_search", False):
+                ls_result = local_search_improve(tour, dist_fn, mode=self.options.get("local_search_mode", "2-opt"))
+                tour = ls_result["tour"]
+
+            from tsp_nbody.local_search import tour_distance
+            distance = tour_distance(tour, dist_fn)
+            return distance, tour
+
+        optimizer = BayesianOptimizer(
+            max_trials=max_trials,
+            verbose=True,
+        )
+
+        def on_trial_complete(trial_idx, trial, best_dist):
+            if self.control_panel:
+                self.control_panel.stats['opt_trial'] = f"{trial_idx + 1}/{max_trials}"
+                self.control_panel.stats['tour_dist'] = f"{trial.distance:,.0f}"
+
+        result = optimizer.optimize(run_trial, on_trial_complete=on_trial_complete)
+
+        # Apply best params to our engine
+        if result.best_params and self.torus_engine:
+            self.torus_engine.shrink_rate = result.best_params[0]
+            self.torus_engine.lj_strength = result.best_params[1]
+            self.torus_engine.perturbation = result.best_params[2]
+            self.torus_engine.epsilon = result.best_params[3]
+
+            if self.control_panel:
+                self.control_panel.set_slider_value('shrink_rate', result.best_params[0])
+                self.control_panel.set_slider_value('lj_strength', result.best_params[1])
+                self.control_panel.set_slider_value('perturbation', result.best_params[2])
+                self.control_panel.set_slider_value('epsilon', result.best_params[3])
+
+        return {
+            'best_params': dict(zip(optimizer.PARAM_NAMES, result.best_params)),
+            'best_cost': result.best_distance,
+            'best_tour': result.best_tour,
+            'n_trials': len(result.trials),
+        }
+
     def cleanup(self):
         """Clean up resources."""
         # Release video writer
@@ -931,124 +1375,187 @@ class TSPNBodySimulator:
                 print(f"\nVideo saved to: {self.options.get('video_output_path')}")
                 self.video_writer = None
 
-        # Close renderer
+        # Close renderers
         if self.renderer:
             self.renderer.close()
+        if self.torus_renderer:
+            self.torus_renderer.close()
 
 
 def main():
     """Main entry point for running the simulator."""
     best_options = {}
-    
+
     # Parse command line arguments
-    if len(sys.argv) > 1:
-        coord_file = sys.argv[1]
-    else:
-        # Default dataset
-        coord_file = "datasets/ch150/coords.txt"
-        # best_options = bay29
+    use_torus = "--torus" in sys.argv
+    use_optimize = "--optimize" in sys.argv
+    coord_file = None
+
+    for arg in sys.argv[1:]:
+        if not arg.startswith("--"):
+            coord_file = arg
+
+    if coord_file is None:
+        coord_file = "datasets/grid4x4/coords.txt"
 
     print("N-Body TSP Simulator")
-    print(f"Using dataset: {coord_file}\n")
+    print(f"Using dataset: {coord_file}")
+    print(f"Mode: {'torus' if use_torus else '2d'}\n")
 
     nbody_options = best_options.get("nbody_options", {})
     renderer_options = best_options.get("renderer_options", {})
     simulator_options = best_options.get("simulator_options", {})
 
-    nbody_options.update({
-        "use_gpu": True,
-        "DAMP": 200.0,
-        "MASS": 80,
-        "WALL_STRENGTH": 2000.0,
-        "FORCE_CUTOFF": 10000.0,
-        "DT": 0.01,
-        "DR": 0.01,
-        "force_mode": "piecewise",
-        "slope_repulsion": 50.0,
-        "mag_attraction": 25,
-        "force_cutoff_extra": 100,
-        "p": 6,
-        "q": 12,
-        "m": -0.05,
-        "lower_pressure_limit": 1.0,
-        "upper_pressure_limit": 10.0,
-        "grid_bins": 8,
-        "min_bin_density": 3,
-        "use_pressure": False,
-        "use_density_grid": True,
-        "use_bubbles": True,
-        "num_bubbles": 4
-    })
+    if use_torus:
+        # Torus mode configuration
+        nbody_options.update({
+            "shrink_rate": 0.10,
+            "epsilon": 0.08,
+            "lj_strength": 1.0,
+            "perturbation": 0.50,
+            "dt": 0.004,
+            "embed_mode": "flat",
+            "outer_radius": 3.0,
+        })
 
-    simulator_options.update({
-        # "use_pressure": True,
-        "use_density_grid": True,
-        "use_bubbles": True,
-        "draw": True,
-        # "use_gpu": False,
-        "render_frequency": 30,
-        # "debug_window": True,
-        # "step_mode": "step",
-        "record_video": True,
-        # "video_output_path": None,  # Auto-generate if None
-        "video_fps": 60,
-        "video_record_frequency": 1,  # Record every N frames (1 = every frame)
-        # "compare_nearest_neighbor": True,
-        "compare_nearest_neighbor": False,
-    })
+        simulator_options.update({
+            "mode": "torus",
+            "draw": True,
+            "render_frequency": 1,
+            "substeps": 4,
+            "use_local_search": True,
+            "local_search_mode": "2-opt",
+            "show_ui_panel": True,
+            "pause_initial": True,
+            "compare_nearest_neighbor": True,
+            "use_gpu": False,
+        })
 
-    renderer_options = {
-        "window_size": (400, 400),
-        "color_background": (1, 1, 1),
-        "color_density": (0.5, 0.2, 1.0),
-        "city_size": 4.0,
-        "path_width": 3.0,
-        "wall_width": 3.0,
-        "padding": 0.5,
-        "use_random_city_colors": True,
-    }
+        renderer_options = {
+            "window_size": (600, 600),
+            "color_background": (0.14, 0.13, 0.11),
+            "city_size": 6.0,
+            "path_width": 2.0,
+            "wall_width": 2.0,
+            "padding": 0.15,
+            "use_random_city_colors": True,
+        }
 
-    simulator = TSPNBodySimulator(
-        coord_file, options=simulator_options,
-        nbody_options=nbody_options, renderer_options=renderer_options
-    )
+        simulator = TSPNBodySimulator(
+            coord_file, options=simulator_options,
+            nbody_options=nbody_options, renderer_options=renderer_options
+        )
 
-    # Initialize
-    if not simulator.initialize():
-        print("Initialization failed. Exiting.")
-        return 1
+        if not simulator.initialize_torus():
+            print("Torus initialization failed. Exiting.")
+            return 1
 
-    # Run simulation
-    try:
-        path, cost = simulator.run_simulation()
+        try:
+            if use_optimize:
+                opt_result = simulator.run_optimization(max_trials=60)
+                print(f"\nBest params: {opt_result['best_params']}")
+                print(f"Best cost: {opt_result['best_cost']:,.0f}")
+                # Run one final time with best params
+                simulator.torus_engine.initialize_physics()
 
-        # Print results
-        # simulator.print_results()
+            path, cost = simulator.run_torus_simulation()
 
-        # Save results
-        output_path = Path(coord_file).with_suffix('.tour.txt')
-        simulator.save_results(str(output_path))
+            output_path = Path(coord_file).with_suffix('.tour.txt')
+            simulator.save_results(str(output_path))
+            simulator.cleanup()
+            return 0
 
-        # Save options
-        options_output_path = Path(coord_file).with_suffix('.options.json')
-        simulator.save_options(str(options_output_path))
+        except KeyboardInterrupt:
+            print("\n\nSimulation interrupted by user")
+            simulator.cleanup()
+            return 1
+        except Exception as e:
+            print(f"\nSimulation failed: {e}")
+            import traceback
+            traceback.print_exc()
+            simulator.cleanup()
+            return 1
 
-        # Cleanup
-        simulator.cleanup()
+    else:
+        # Original 2D mode
+        nbody_options.update({
+            "use_gpu": True,
+            "DAMP": 20.0,
+            "MASS": 80,
+            "WALL_STRENGTH": 2000.0,
+            "FORCE_CUTOFF": 10000.0,
+            "DT": 0.01,
+            "DR": 0.01,
+            "force_mode": "piecewise",
+            "slope_repulsion": 50.0,
+            "mag_attraction": 25,
+            "force_cutoff_extra": 100,
+            "p": 6,
+            "q": 12,
+            "m": -0.05,
+            "lower_pressure_limit": 1.0,
+            "upper_pressure_limit": 10.0,
+            "grid_bins": 8,
+            "min_bin_density": 3,
+            "use_pressure": False,
+            "use_density_grid": True,
+            "use_bubbles": True,
+            "num_bubbles": 4
+        })
 
-        return 0
+        simulator_options.update({
+            "use_density_grid": True,
+            "use_bubbles": True,
+            "draw": True,
+            "render_frequency": 1,
+            "record_video": True,
+            "video_fps": 60,
+            "video_record_frequency": 1,
+            "compare_nearest_neighbor": False,
+        })
 
-    except KeyboardInterrupt:
-        print("\n\nSimulation interrupted by user")
-        simulator.cleanup()
-        return 1
-    except Exception as e:
-        print(f"\nSimulation failed with error: {e}")
-        import traceback
+        renderer_options = {
+            "window_size": (400, 400),
+            "color_background": (1, 1, 1),
+            "color_density": (0.5, 0.2, 1.0),
+            "city_size": 4.0,
+            "path_width": 3.0,
+            "wall_width": 3.0,
+            "padding": 0.5,
+            "use_random_city_colors": True,
+        }
 
-        traceback.print_exc()
-        simulator.cleanup()
-        return 1
+        simulator = TSPNBodySimulator(
+            coord_file, options=simulator_options,
+            nbody_options=nbody_options, renderer_options=renderer_options
+        )
+
+        if not simulator.initialize():
+            print("Initialization failed. Exiting.")
+            return 1
+
+        try:
+            path, cost = simulator.run_simulation()
+
+            output_path = Path(coord_file).with_suffix('.tour.txt')
+            simulator.save_results(str(output_path))
+
+            options_output_path = Path(coord_file).with_suffix('.options.json')
+            simulator.save_options(str(options_output_path))
+
+            simulator.cleanup()
+            return 0
+
+        except KeyboardInterrupt:
+            print("\n\nSimulation interrupted by user")
+            simulator.cleanup()
+            return 1
+        except Exception as e:
+            print(f"\nSimulation failed with error: {e}")
+            import traceback
+            traceback.print_exc()
+            simulator.cleanup()
+            return 1
 
 
 if __name__ == "__main__":
