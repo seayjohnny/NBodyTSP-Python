@@ -1,7 +1,7 @@
 """
-Bayesian Optimization for Torus TSP Parameters.
+Bayesian Optimization for N-Body TSP Parameters.
 
-Searches a 4D parameter space (shrinkRate, ljStrength, perturbation, epsilon)
+Engine-agnostic optimizer that searches a configurable parameter space
 to minimize tour distance. Uses Latin Hypercube initial sampling followed by
 Gaussian Process surrogate with Expected Improvement acquisition.
 
@@ -12,6 +12,33 @@ import math
 import numpy as np
 from typing import Callable, Optional
 from dataclasses import dataclass, field
+
+
+# ---------------------------------------------------------------------------
+# Preset parameter bounds for each geometry
+# ---------------------------------------------------------------------------
+
+TORUS_PARAM_BOUNDS = [
+    (0.02, 0.45),   # collapse_rate
+    (0.2, 4.5),     # lj_strength
+    (0.0, 1.0),     # perturbation
+    (0.02, 0.25),   # epsilon
+]
+TORUS_PARAM_NAMES = ['collapse_rate', 'lj_strength', 'perturbation', 'epsilon']
+
+ANNULAR_PARAM_BOUNDS = [
+    (0.02, 0.45),   # collapse_rate
+    (0.2, 4.5),     # lj_strength
+    (0.02, 0.25),   # epsilon
+]
+ANNULAR_PARAM_NAMES = ['collapse_rate', 'lj_strength', 'epsilon']
+
+PLANAR_PARAM_BOUNDS = [
+    (0.001, 0.05),  # collapse_rate
+    (0.1, 50.0),    # lj_strength
+    (0.5, 1.0),     # damping
+]
+PLANAR_PARAM_NAMES = ['collapse_rate', 'lj_strength', 'damping']
 
 
 @dataclass
@@ -26,29 +53,24 @@ class OptimizerResult:
     best_distance: float
     best_tour: Optional[list[int]]
     trials: list[OptTrial]
-    param_names: list[str] = field(default_factory=lambda: ['shrink_rate', 'lj_strength', 'perturbation', 'epsilon'])
+    param_names: list[str] = field(default_factory=list)
 
 
 class BayesianOptimizer:
-    """Bayesian optimization for torus collapse parameters."""
-
-    # Parameter space: [shrinkRate, ljStrength, perturbation, epsilon]
-    PARAM_BOUNDS = [
-        (0.02, 0.45),   # shrink_rate
-        (0.2, 4.5),     # lj_strength
-        (0.0, 1.0),     # perturbation
-        (0.02, 0.25),   # epsilon
-    ]
-    PARAM_NAMES = ['shrink_rate', 'lj_strength', 'perturbation', 'epsilon']
+    """Bayesian optimization for N-body collapse parameters."""
 
     def __init__(
         self,
+        param_bounds: list[tuple[float, float]],
+        param_names: list[str],
         max_trials: int = 60,
         n_initial: int = 15,
         n_candidates: int = 200,
         seed: int = 42,
         verbose: bool = True,
     ):
+        self.PARAM_BOUNDS = param_bounds
+        self.PARAM_NAMES = param_names
         self.max_trials = max_trials
         self.n_initial = n_initial
         self.n_candidates = n_candidates
@@ -153,23 +175,56 @@ class BayesianOptimizer:
 
         return best_candidate
 
-    def optimize(
+    def suggest_params(self) -> list[float]:
+        """Return the next parameter set to evaluate."""
+        idx = len(self.trials)
+        if idx < self.n_initial:
+            return self._sample_initial(idx)
+        return self._sample_bayesian()
+
+    def report_result(
         self,
-        run_trial: Callable[[dict], tuple[float, Optional[list[int]]]],
-        on_trial_complete: Optional[Callable[[int, OptTrial, float], None]] = None,
-    ) -> OptimizerResult:
-        """
-        Run the full optimization loop.
+        params: list[float],
+        distance: float,
+        tour: Optional[list[int]] = None,
+    ) -> dict:
+        """Record a completed trial and return a summary dict."""
+        trial = OptTrial(params=params, distance=distance)
+        self.trials.append(trial)
 
-        Args:
-            run_trial: Function that takes a dict of parameters
-                       {shrink_rate, lj_strength, perturbation, epsilon, seed}
-                       and returns (tour_distance, tour_or_None)
-            on_trial_complete: Optional callback(trial_index, trial, best_dist_so_far)
+        if distance < self.best_dist:
+            self.best_dist = distance
+            self.best_params = list(params)
+            self.best_tour = list(tour) if tour else None
 
-        Returns:
-            OptimizerResult with best parameters, distance, and all trials
-        """
+        param_dict = {name: val for name, val in zip(self.PARAM_NAMES, params)}
+        best_param_dict = {
+            name: val for name, val in zip(self.PARAM_NAMES, self.best_params)
+        } if self.best_params else {}
+
+        return {
+            "trial": len(self.trials),
+            "max_trials": self.max_trials,
+            "params": param_dict,
+            "distance": distance,
+            "best_distance": self.best_dist,
+            "best_params": best_param_dict,
+        }
+
+    @property
+    def is_complete(self) -> bool:
+        return len(self.trials) >= self.max_trials
+
+    def get_result(self) -> OptimizerResult:
+        return OptimizerResult(
+            best_params=self.best_params or [0.0] * len(self.PARAM_BOUNDS),
+            best_distance=self.best_dist,
+            best_tour=self.best_tour,
+            trials=self.trials,
+            param_names=list(self.PARAM_NAMES),
+        )
+
+    def optimize(self, run_trial, on_trial_complete=None):
         self.trials = []
         self.best_dist = float('inf')
         self.best_params = None
@@ -180,66 +235,85 @@ class BayesianOptimizer:
             print("BAYESIAN OPTIMIZATION")
             print(f"  Max trials: {self.max_trials}")
             print(f"  Initial samples: {self.n_initial}")
-            print(f"  Bayesian candidates: {self.n_candidates}")
             print("=" * 60)
 
-        for trial_idx in range(self.max_trials):
-            # Pick parameters
-            if trial_idx < self.n_initial:
-                params = self._sample_initial(trial_idx)
-                method = "LHS"
-            else:
-                params = self._sample_bayesian()
-                method = "GP-EI"
+        while not self.is_complete:
+            params = self.suggest_params()
+            trial_config = {name: val for name, val in zip(self.PARAM_NAMES, params)}
+            trial_config['seed'] = self.seed + len(self.trials) * 7
 
-            # Build trial config
-            trial_config = {
-                'shrink_rate': params[0],
-                'lj_strength': params[1],
-                'perturbation': params[2],
-                'epsilon': params[3],
-                'seed': self.seed + trial_idx * 7,
-            }
-
-            # Run trial
             distance, tour = run_trial(trial_config)
-            trial = OptTrial(params=params, distance=distance)
-            self.trials.append(trial)
-
-            if distance < self.best_dist:
-                self.best_dist = distance
-                self.best_params = list(params)
-                self.best_tour = list(tour) if tour else None
+            method = "LHS" if len(self.trials) < self.n_initial else "GP-EI"
+            self.report_result(params, distance, tour)
 
             if self.verbose:
-                gap_str = ""
-                print(
-                    f"  Trial {trial_idx + 1:3d}/{self.max_trials} [{method:5s}] "
-                    f"dist={distance:,.0f}  best={self.best_dist:,.0f}  "
-                    f"S:{params[0]:.2f} LJ:{params[1]:.1f} P:{params[2]:.2f} E:{params[3]:.2f}"
-                )
+                param_str = "  ".join(f"{name}:{val:.3f}" for name, val in zip(self.PARAM_NAMES, params))
+                print(f"  Trial {len(self.trials):3d}/{self.max_trials} [{method:5s}] dist={distance:,.0f}  best={self.best_dist:,.0f}  {param_str}")
 
             if on_trial_complete:
-                on_trial_complete(trial_idx, trial, self.best_dist)
+                on_trial_complete(len(self.trials) - 1, self.trials[-1], self.best_dist)
 
         if self.verbose:
-            print("\n" + "-" * 60)
-            print(f"BEST: dist={self.best_dist:,.0f}")
+            print(f"\nBEST: dist={self.best_dist:,.0f}")
             if self.best_params:
-                print(
-                    f"  shrink_rate={self.best_params[0]:.3f}  "
-                    f"lj_strength={self.best_params[1]:.3f}  "
-                    f"perturbation={self.best_params[2]:.3f}  "
-                    f"epsilon={self.best_params[3]:.3f}"
-                )
+                ps = "  ".join(f"{n}={v:.3f}" for n, v in zip(self.PARAM_NAMES, self.best_params))
+                print(f"  {ps}")
             print("=" * 60 + "\n")
 
-        return OptimizerResult(
-            best_params=self.best_params or [0] * 4,
-            best_distance=self.best_dist,
-            best_tour=self.best_tour,
-            trials=self.trials,
+        return self.get_result()
+
+
+def make_engine_objective(
+    coords: np.ndarray,
+    geometry: str = "torus",
+    force_model: str = "true_lj",
+    wall_model: str = "inverse_square",
+    backend: str = "gpu",
+    base_options: dict = None,
+    param_names: list[str] = None,
+    substeps_per_batch: int = 4,
+    max_batches: int = 10000,
+) -> Callable:
+    """Create an objective function that runs a headless simulation to completion.
+
+    Returns a callable: trial_params (list[float]) -> (distance, tour_0indexed)
+    """
+    from tsp_nbody.engine import PhysicsEngine
+    from tsp_nbody.local_search import make_euclidean_dist_fn, tour_distance
+
+    def objective(params: list[float]) -> tuple[float, list[int]]:
+        opts = dict(base_options or {})
+        for name, val in zip(param_names, params):
+            opts[name] = val
+
+        engine = PhysicsEngine(
+            coords=coords,
+            geometry=geometry,
+            force_model=force_model,
+            wall_model=wall_model,
+            backend=backend,
+            options=opts,
         )
+        engine.initialize_physics()
+        engine.start_collapse()
+
+        for _ in range(max_batches):
+            engine.run_substeps(substeps_per_batch)
+            if engine.is_complete:
+                break
+
+        tour = engine.get_found_tour()
+        if tour is None:
+            tour = engine.get_final_tour().tolist()
+
+        # tour is 0-indexed; distance computation needs 1-indexed
+        tour_1indexed = [i + 1 for i in tour]
+        dist_fn = make_euclidean_dist_fn(coords)
+        distance = tour_distance(tour_1indexed, dist_fn)
+
+        return distance, tour
+
+    return objective
 
 
 def _normcdf(x: float) -> float:
