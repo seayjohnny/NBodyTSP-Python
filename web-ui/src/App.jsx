@@ -3,6 +3,8 @@ import SetupScreen from './components/SetupScreen';
 import ControlPanel from './components/ControlPanel';
 import SimCanvas from './components/SimCanvas';
 import FullTourMap from './components/FullTourMap';
+import OptimizeModal from './components/OptimizeModal';
+import OptimizeOverlay from './components/OptimizeOverlay';
 import { useSimulation } from './hooks/useSimulation';
 import { getTheme, THEME_NAMES } from './themes';
 
@@ -12,7 +14,13 @@ export default function App() {
   const [themeName, setThemeName] = useState('dark');
   const [theme, setTheme] = useState(() => getTheme('dark'));
   const [view, setView] = useState('sim');
-  const { connect, disconnect, sendCmd, sendParam, metadata, stateRef } = useSimulation();
+  const [showOptModal, setShowOptModal] = useState(false);
+  const {
+    connect, disconnect, sendCmd, sendParam,
+    sendOptStart, sendOptStop,
+    metadata, stateRef,
+    optimizing, optTrials, bestOptResult,
+  } = useSimulation();
 
   const handleThemeChange = useCallback((name) => {
     setThemeName(name);
@@ -32,6 +40,11 @@ export default function App() {
     setScreen('setup');
     setView('sim');
   }, [disconnect]);
+
+  const handleOptStart = useCallback((config) => {
+    setShowOptModal(false);
+    sendOptStart(config);
+  }, [sendOptStart]);
 
   if (screen === 'setup') {
     return (
@@ -85,7 +98,26 @@ export default function App() {
         sendCmd={sendCmd}
         metadata={metadata}
         onMenu={handleMenu}
+        onOptimize={() => setShowOptModal(true)}
+        optimizing={optimizing}
+        bestOptResult={bestOptResult}
       />
+      {showOptModal && (
+        <OptimizeModal
+          mode={mode}
+          theme={theme}
+          onStart={handleOptStart}
+          onClose={() => setShowOptModal(false)}
+        />
+      )}
+      {optimizing && (
+        <OptimizeOverlay
+          optTrials={optTrials}
+          bestOptResult={bestOptResult}
+          onStop={sendOptStop}
+          theme={theme}
+        />
+      )}
     </div>
   );
 }

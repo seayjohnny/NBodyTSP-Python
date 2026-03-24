@@ -3,7 +3,7 @@ import TourMap from './TourMap';
 import { THEMES, THEME_NAMES } from '../themes';
 
 function Slider({ label, value, min, max, step, fmt, onChange, theme }) {
-  const display = fmt === 'd' ? Math.round(value) : value.toFixed(2);
+  const display = fmt === 'd' ? Math.round(value) : value.toFixed(3);
   return (
     <div>
       <div className="flex justify-between text-[10px] font-mono uppercase tracking-wider" style={{ color: theme.textDim }}>
@@ -18,28 +18,40 @@ function Slider({ label, value, min, max, step, fmt, onChange, theme }) {
   );
 }
 
-export default function ControlPanel({ mode, theme, themeName, onThemeChange, sendParam, sendCmd, metadata, onMenu }) {
+export default function ControlPanel({ mode, theme, themeName, onThemeChange, sendParam, sendCmd, metadata, onMenu, onOptimize, optimizing, bestOptResult }) {
   const isTorus = mode === 'torus' || mode === 'annular';
-  const [params, setParams] = useState(
-    isTorus
-      ? { shrink_rate: 0.10, epsilon: 0.08, lj_strength: 1.0, perturbation: 0.50, substeps: 4 }
-      : { wall_strength: 20000, damp: 20, dt: 0.01, dr: 0.01, slope_repulsion: 50, mag_attraction: 25, lj_strength: 1.0, substeps: 4 }
-  );
+  const [params, setParams] = useState({
+    collapse_rate: isTorus ? 0.10 : 0.01,
+    epsilon: 0.08,
+    lj_strength: 1.0,
+    damping: 0.97,
+    dt: 0.004,
+    substeps: 4,
+    perturbation: 0.50,
+    wall_strength: 20000,
+  });
 
   const synced = useRef(false);
   useEffect(() => {
-    if (!isTorus && metadata?.wall_strength != null && !synced.current) {
+    if (metadata?.lj_strength != null && !synced.current) {
       setParams(p => ({
         ...p,
-        wall_strength: metadata.wall_strength,
-        damp: metadata.damp,
-        dt: metadata.dt,
-        dr: metadata.dr,
+        collapse_rate: metadata.collapse_rate ?? p.collapse_rate,
+        epsilon: metadata.epsilon ?? p.epsilon,
         lj_strength: metadata.lj_strength ?? p.lj_strength,
+        damping: metadata.damping ?? p.damping,
+        dt: metadata.dt ?? p.dt,
+        wall_strength: metadata.wall_strength ?? p.wall_strength,
       }));
       synced.current = true;
     }
-  }, [metadata, isTorus]);
+  }, [metadata]);
+
+  useEffect(() => {
+    if (!optimizing && bestOptResult?.best_params) {
+      setParams(p => ({ ...p, ...bestOptResult.best_params }));
+    }
+  }, [bestOptResult, optimizing]);
 
   const setP = (key, value) => {
     setParams(p => ({ ...p, [key]: value }));
@@ -48,9 +60,9 @@ export default function ControlPanel({ mode, theme, themeName, onThemeChange, se
 
   const phase = metadata.phase || 'READY';
   const phaseColor = (phase === 'COLLAPSING' || phase === 'RUNNING') ? theme.warn
-    : (phase === 'CIRCLE' || phase === 'COLLAPSED') ? theme.accent : theme.good;
+    : (phase === 'CIRCLE' || phase === 'COLLAPSED' || phase === 'FINISHED') ? theme.accent : theme.good;
 
-  const t = theme; // shorthand
+  const t = theme;
 
   const selectStyle = {
     background: t.selectBg, border: `1px solid ${t.panelBorder}`,
@@ -66,44 +78,62 @@ export default function ControlPanel({ mode, theme, themeName, onThemeChange, se
       {/* Title */}
       <div className="p-4 border-b" style={{ borderColor: t.panelBorder }}>
         <h2 className="font-mono text-xs font-semibold tracking-wider uppercase" style={{ color: t.accent }}>
-          {mode === 'torus' ? 'Torus Controls' : mode === 'annular' ? 'Annular Controls' : '2D Controls'}
+          {mode === 'torus' ? 'Torus' : mode === 'annular' ? 'Annular' : '2D'} Controls
         </h2>
       </div>
 
       {/* Sliders */}
       <div className="p-4 space-y-3 flex-1">
-        {isTorus ? (
-          <>
-            <Slider label="Shrink Rate" value={params.shrink_rate} min={0.01} max={0.5} step={0.01} onChange={v => setP('shrink_rate', v)} theme={t} />
-            <Slider label="Epsilon" value={params.epsilon} min={0.01} max={0.3} step={0.01} onChange={v => setP('epsilon', v)} theme={t} />
-            <Slider label="LJ Strength" value={params.lj_strength} min={0.1} max={5} step={0.1} onChange={v => setP('lj_strength', v)} theme={t} />
-            {mode === 'torus' && <Slider label="Perturbation" value={params.perturbation} min={0} max={1} step={0.05} onChange={v => setP('perturbation', v)} theme={t} />}
-            <Slider label="Speed" value={params.substeps} min={1} max={64} step={1} fmt="d" onChange={v => setP('substeps', v)} theme={t} />
-          </>
-        ) : (
-          <>
-            <Slider label="Wall Strength" value={params.wall_strength} min={100} max={50000} step={100} fmt="d" onChange={v => setP('wall_strength', v)} theme={t} />
-            <Slider label="Damping" value={params.damp} min={1} max={100} step={1} onChange={v => setP('damp', v)} theme={t} />
-            <Slider label="LJ Strength" value={params.lj_strength} min={0.1} max={5} step={0.1} onChange={v => setP('lj_strength', v)} theme={t} />
-            <Slider label="DT" value={params.dt} min={0.001} max={0.05} step={0.001} onChange={v => setP('dt', v)} theme={t} />
-            <Slider label="DR" value={params.dr} min={0.001} max={0.05} step={0.001} onChange={v => setP('dr', v)} theme={t} />
-            <Slider label="Speed" value={params.substeps} min={1} max={64} step={1} fmt="d" onChange={v => setP('substeps', v)} theme={t} />
-          </>
+        {/* Common parameters */}
+        <Slider label="Collapse Rate" value={params.collapse_rate} min={0.001} max={0.5} step={0.001}
+          onChange={v => setP('collapse_rate', v)} theme={t} />
+        <Slider label="Epsilon" value={params.epsilon} min={0.01} max={0.3} step={0.01}
+          onChange={v => setP('epsilon', v)} theme={t} />
+        <Slider label="LJ Strength" value={params.lj_strength} min={0.1} max={5} step={0.1}
+          onChange={v => setP('lj_strength', v)} theme={t} />
+        <Slider label="Damping" value={params.damping} min={0.5} max={1.0} step={0.01}
+          onChange={v => setP('damping', v)} theme={t} />
+        <Slider label="DT" value={params.dt} min={0.001} max={0.05} step={0.001}
+          onChange={v => setP('dt', v)} theme={t} />
+
+        {/* Planar-specific */}
+        {mode === '2d' && (
+          <Slider label="Wall Strength" value={params.wall_strength} min={100} max={50000} step={100} fmt="d"
+            onChange={v => setP('wall_strength', v)} theme={t} />
         )}
+
+        {/* Torus-specific */}
+        {mode === 'torus' && (
+          <Slider label="Perturbation" value={params.perturbation} min={0} max={1} step={0.05}
+            onChange={v => setP('perturbation', v)} theme={t} />
+        )}
+
+        <Slider label="Speed" value={params.substeps} min={1} max={64} step={1} fmt="d"
+          onChange={v => setP('substeps', v)} theme={t} />
 
         {/* Buttons */}
         <div className="flex gap-2 pt-2">
-          <button onClick={() => sendCmd('start')}
+          <button onClick={() => sendCmd('start')} disabled={optimizing}
             className="flex-1 text-white text-xs font-mono font-semibold py-2 rounded-md cursor-pointer"
-            style={{ background: t.accent }}>
+            style={{ background: t.accent, opacity: optimizing ? 0.5 : 1 }}>
             {isTorus ? 'COLLAPSE' : 'START'}
           </button>
-          <button onClick={() => sendCmd('reset')}
+          <button onClick={() => sendCmd('reset')} disabled={optimizing}
             className="flex-1 text-xs font-mono font-semibold py-2 rounded-md border cursor-pointer"
-            style={{ background: t.panelLight, borderColor: t.panelBorder, color: t.text }}>
+            style={{ background: t.panelLight, borderColor: t.panelBorder, color: t.text, opacity: optimizing ? 0.5 : 1 }}>
             RESET
           </button>
         </div>
+        <button onClick={onOptimize} disabled={optimizing}
+          className="w-full text-xs font-mono font-semibold py-2 rounded-md border cursor-pointer mt-2"
+          style={{
+            background: optimizing ? t.panelBg : t.panelLight,
+            borderColor: t.panelBorder,
+            color: optimizing ? t.textDim : t.accent,
+            opacity: optimizing ? 0.5 : 1,
+          }}>
+          {optimizing ? 'OPTIMIZING...' : 'OPTIMIZE'}
+        </button>
 
         {mode === 'torus' && (
           <div className="pt-1">
