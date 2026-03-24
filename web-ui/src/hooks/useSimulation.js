@@ -4,6 +4,10 @@ export function useSimulation() {
   const wsRef = useRef(null);
   const [connected, setConnected] = useState(false);
   const [metadata, setMetadata] = useState({});
+  const [optimizing, setOptimizing] = useState(false);
+  const [optTrials, setOptTrials] = useState([]);
+  const [bestOptResult, setBestOptResult] = useState(null);
+
   const stateRef = useRef({
     positions: null, velocities: null, N: 0,
     R: 0, r: 0, r0: 0, phase: 0,
@@ -27,6 +31,14 @@ export function useSimulation() {
       if (typeof e.data === 'string') {
         const msg = JSON.parse(e.data);
         if (msg.type === 'metadata') setMetadata(msg.data);
+        else if (msg.type === 'opt_trial') {
+          setOptTrials(prev => [...prev, msg.data]);
+          setBestOptResult(msg.data);
+        }
+        else if (msg.type === 'opt_complete') {
+          setOptimizing(false);
+          setBestOptResult(msg.data);
+        }
       } else {
         parseState(e.data, stateRef.current);
         if (frameCallbackRef.current) frameCallbackRef.current(stateRef.current);
@@ -40,6 +52,9 @@ export function useSimulation() {
     if (wsRef.current) { wsRef.current.close(); wsRef.current = null; }
     setConnected(false);
     setMetadata({});
+    setOptimizing(false);
+    setOptTrials([]);
+    setBestOptResult(null);
   }, []);
 
   const sendCmd = useCallback((cmd) => {
@@ -52,9 +67,28 @@ export function useSimulation() {
       wsRef.current.send(JSON.stringify({ cmd: 'set_param', key, value }));
   }, []);
 
+  const sendOptStart = useCallback((config) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      setOptimizing(true);
+      setOptTrials([]);
+      setBestOptResult(null);
+      wsRef.current.send(JSON.stringify({ cmd: 'optimize_start', config }));
+    }
+  }, []);
+
+  const sendOptStop = useCallback(() => {
+    if (wsRef.current?.readyState === WebSocket.OPEN)
+      wsRef.current.send(JSON.stringify({ cmd: 'optimize_stop' }));
+  }, []);
+
   useEffect(() => () => disconnect(), [disconnect]);
 
-  return { connect, disconnect, sendCmd, sendParam, connected, metadata, stateRef };
+  return {
+    connect, disconnect, sendCmd, sendParam,
+    sendOptStart, sendOptStop,
+    connected, metadata, stateRef,
+    optimizing, optTrials, bestOptResult,
+  };
 }
 
 function parseState(ab, state) {
@@ -62,7 +96,6 @@ function parseState(ab, state) {
   const mode = buf.getUint32(0, true);
 
   if (mode === 0) {
-    // Torus: 24-byte header
     state.mode = 'torus';
     state.N = buf.getUint32(4, true);
     state.R = buf.getFloat32(8, true);
@@ -73,7 +106,6 @@ function parseState(ab, state) {
     state.positions = new Float32Array(ab, h, n3);
     state.velocities = new Float32Array(ab, h + n3 * 4, n3);
   } else {
-    // 2D or Annular: 20-byte header (same format)
     state.mode = (mode === 2) ? 'annular' : '2d';
     state.N = buf.getUint32(4, true);
     state.innerR = buf.getFloat32(8, true);
