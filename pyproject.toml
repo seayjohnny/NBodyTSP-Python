@@ -1,17 +1,15 @@
 [project]
 name = "nbodytsp-python"
-version = "0.1.0"
-description = "Add your description here"
+version = "0.2.0"
+description = "N-Body TSP Simulator with composable physics engine and web UI"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "numpy>=2.3.4",
-    "opencv-python>=4.11.0.86",
     "pandas>=2.3.3",
-    "pillow>=12.0.0",
-    "pygame>=2.6.1",
-    "pyopengl>=3.1.10",
-    "pywin32>=311 ; sys_platform == 'win32'",
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    "websockets>=12.0",
 ]
 
 [project.optional-dependencies]
@@ -25,5 +23,8 @@ cuda11 = [
     "cupy-cuda11x>=13.6.0",
 ]
 
+[project.scripts]
+nbodytsp = "tsp_nbody.server:main"
+
 [tool.setuptools]
-packages = ["tsp_nbody"]
+packages = ["tsp_nbody", "tsp_nbody.kernels"]

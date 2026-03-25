@@ -1,0 +1,112 @@
+<h2>Optimization Setup</h2>
+<p class="subtitle">How should the user configure and launch optimization? This appears when they click "Optimize".</p>
+
+<div class="options">
+  <div class="option" data-choice="a" onclick="toggleSelect(this)">
+    <div class="letter">A</div>
+    <div class="content">
+      <h3>Modal Dialog</h3>
+      <p>A centered modal pops up with parameter checkboxes, bounds, trial count, fast/visual toggle, and a "Start" button. Dismissable with Escape or clicking outside.</p>
+      <div class="mockup" style="margin-top:12px">
+        <div class="mockup-body" style="background:rgba(10,10,14,0.85);position:relative;height:360px;display:flex;align-items:center;justify-content:center">
+          <!-- Modal -->
+          <div style="background:#1c1e24;border:1px solid #3a3d48;border-radius:12px;padding:20px 24px;width:380px;font-family:'JetBrains Mono',monospace;font-size:10px;color:#a0a4b0;box-shadow:0 20px 60px rgba(0,0,0,0.5)">
+            <div style="font-size:11px;font-weight:700;color:#e8e4de;margin-bottom:4px">Configure Optimization</div>
+            <div style="font-size:8px;color:#666;margin-bottom:14px;letter-spacing:1px;text-transform:uppercase">Bayesian parameter search</div>
+
+            <div style="font-size:8px;color:#888;margin-bottom:6px;letter-spacing:1px;text-transform:uppercase">Parameters to optimize</div>
+
+            <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:14px">
+              <label style="display:flex;align-items:center;gap:8px;padding:6px 8px;background:#14161a;border-radius:6px;border:1px solid #2a2d36;cursor:pointer">
+                <input type="checkbox" checked style="accent-color:#c0582a;width:13px;height:13px">
+                <div style="flex:1">
+                  <div style="color:#e8e4de;font-size:10px">Collapse Rate</div>
+                  <div style="color:#666;font-size:8px">0.02 — 0.45</div>
+                </div>
+              </label>
+              <label style="display:flex;align-items:center;gap:8px;padding:6px 8px;background:#14161a;border-radius:6px;border:1px solid #2a2d36;cursor:pointer">
+                <input type="checkbox" checked style="accent-color:#c0582a;width:13px;height:13px">
+                <div style="flex:1">
+                  <div style="color:#e8e4de;font-size:10px">LJ Strength</div>
+                  <div style="color:#666;font-size:8px">0.2 — 4.5</div>
+                </div>
+              </label>
+              <label style="display:flex;align-items:center;gap:8px;padding:6px 8px;background:#14161a;border-radius:6px;border:1px solid #2a2d36;cursor:pointer">
+                <input type="checkbox" checked style="accent-color:#c0582a;width:13px;height:13px">
+                <div style="flex:1">
+                  <div style="color:#e8e4de;font-size:10px">Perturbation</div>
+                  <div style="color:#666;font-size:8px">0.0 — 1.0</div>
+                </div>
+              </label>
+              <label style="display:flex;align-items:center;gap:8px;padding:6px 8px;background:#14161a;border-radius:6px;border:1px solid #2a2d36;cursor:pointer">
+                <input type="checkbox" checked style="accent-color:#c0582a;width:13px;height:13px">
+                <div style="flex:1">
+                  <div style="color:#e8e4de;font-size:10px">Epsilon</div>
+                  <div style="color:#666;font-size:8px">0.02 — 0.25</div>
+                </div>
+              </label>
+            </div>
+
+            <div style="display:flex;gap:12px;margin-bottom:14px">
+              <div style="flex:1">
+                <div style="font-size:8px;color:#888;margin-bottom:4px;letter-spacing:1px;text-transform:uppercase">Trials</div>
+                <input type="number" value="60" style="width:100%;background:#14161a;border:1px solid #2a2d36;border-radius:4px;padding:5px 8px;color:#e8e4de;font-family:inherit;font-size:10px;outline:none">
+              </div>
+              <div style="flex:1">
+                <div style="font-size:8px;color:#888;margin-bottom:4px;letter-spacing:1px;text-transform:uppercase">Mode</div>
+                <div style="display:flex;gap:0;border:1px solid #2a2d36;border-radius:4px;overflow:hidden">
+                  <div style="flex:1;text-align:center;padding:5px;background:#c0582a;color:white;font-size:9px;font-weight:600;cursor:pointer">FAST</div>
+                  <div style="flex:1;text-align:center;padding:5px;background:#14161a;color:#666;font-size:9px;cursor:pointer">VISUAL</div>
+                </div>
+              </div>
+            </div>
+
+            <div style="display:flex;gap:8px">
+              <button style="flex:1;background:#c0582a;color:white;border:none;padding:8px;border-radius:6px;font-family:inherit;font-size:10px;font-weight:600;cursor:pointer;letter-spacing:1px">START OPTIMIZATION</button>
+              <button style="padding:8px 14px;background:#2a2d36;color:#888;border:none;border-radius:6px;font-family:inherit;font-size:10px;cursor:pointer">CANCEL</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="option" data-choice="b" onclick="toggleSelect(this)">
+    <div class="letter">B</div>
+    <div class="content">
+      <h3>Inline in Control Panel</h3>
+      <p>An "Optimize" button in the control panel expands to show parameter checkboxes and settings inline, below the existing sliders. More compact but tighter space.</p>
+      <div class="mockup" style="margin-top:12px">
+        <div class="mockup-body" style="background:#1a1c22;position:relative;height:360px;display:flex">
+          <div style="flex:1;background:radial-gradient(circle at 50% 50%, #1e2028 0%, #14161a 100%)"></div>
+          <div style="width:220px;background:#1c1e24;border-left:1px solid #2a2d36;padding:12px;font-family:'JetBrains Mono',monospace;font-size:9px;color:#a0a4b0;overflow-y:auto">
+            <div style="font-size:8px;letter-spacing:2px;color:#c0582a;margin-bottom:8px;font-weight:600">CONTROLS</div>
+            <!-- Existing sliders (dimmed) -->
+            <div style="opacity:0.4;margin-bottom:8px">
+              <div style="margin-bottom:4px;font-size:8px">Collapse Rate</div>
+              <div style="height:3px;background:#2a2d36;border-radius:2px"></div>
+            </div>
+            <div style="opacity:0.4;margin-bottom:8px">
+              <div style="margin-bottom:4px;font-size:8px">LJ Strength</div>
+              <div style="height:3px;background:#2a2d36;border-radius:2px"></div>
+            </div>
+
+            <!-- Optimizer section expanded -->
+            <div style="border-top:1px solid #2a2d36;padding-top:8px;margin-top:4px">
+              <div style="font-size:8px;letter-spacing:2px;color:#c0582a;margin-bottom:6px;font-weight:600">OPTIMIZE</div>
+              <label style="display:flex;align-items:center;gap:4px;margin-bottom:3px;font-size:8px"><input type="checkbox" checked style="accent-color:#c0582a;width:10px;height:10px">Collapse Rate</label>
+              <label style="display:flex;align-items:center;gap:4px;margin-bottom:3px;font-size:8px"><input type="checkbox" checked style="accent-color:#c0582a;width:10px;height:10px">LJ Strength</label>
+              <label style="display:flex;align-items:center;gap:4px;margin-bottom:3px;font-size:8px"><input type="checkbox" checked style="accent-color:#c0582a;width:10px;height:10px">Perturbation</label>
+              <label style="display:flex;align-items:center;gap:4px;margin-bottom:6px;font-size:8px"><input type="checkbox" checked style="accent-color:#c0582a;width:10px;height:10px">Epsilon</label>
+              <div style="display:flex;gap:4px;margin-bottom:6px">
+                <div style="flex:1;text-align:center;padding:3px;background:#c0582a;color:white;border-radius:3px;font-size:7px">FAST</div>
+                <div style="flex:1;text-align:center;padding:3px;background:#2a2d36;color:#666;border-radius:3px;font-size:7px">VISUAL</div>
+              </div>
+              <button style="width:100%;background:#c0582a;color:white;border:none;padding:5px;border-radius:4px;font-family:inherit;font-size:8px;font-weight:600;cursor:pointer">START</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>

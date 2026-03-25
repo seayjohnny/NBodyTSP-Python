@@ -1,0 +1,126 @@
+<h2>Optimization Panel Layout</h2>
+<p class="subtitle">Where should the optimization UI appear during a run?</p>
+
+<div class="options">
+  <div class="option" data-choice="a" onclick="toggleSelect(this)">
+    <div class="letter">A</div>
+    <div class="content">
+      <h3>Overlay Panel (like JS version)</h3>
+      <p>Fixed panel centered at top of screen, overlaying the canvas. Shows trial progress, convergence chart, current/best params. Has a "Stop & Use Best" button. Disappears when optimization ends.</p>
+      <div class="mockup" style="margin-top:12px">
+        <div class="mockup-body" style="background:#1a1c22;position:relative;height:280px;overflow:hidden">
+          <!-- Simulated canvas background -->
+          <div style="position:absolute;inset:0;background:radial-gradient(circle at 50% 50%, #1e2028 0%, #14161a 100%);opacity:0.6"></div>
+
+          <!-- Overlay panel -->
+          <div style="position:absolute;top:16px;left:50%;transform:translateX(-50%);background:rgba(28,30,36,0.95);backdrop-filter:blur(12px);border:1px solid #3a3d48;border-radius:10px;padding:16px 20px;width:420px;font-family:'JetBrains Mono',monospace;font-size:10px;color:#a0a4b0">
+            <div style="text-align:center;font-size:9px;letter-spacing:2px;color:#c0582a;margin-bottom:10px;font-weight:600">BAYESIAN OPTIMIZATION</div>
+
+            <div style="display:flex;justify-content:space-between;margin-bottom:8px">
+              <span>TRIAL</span>
+              <span style="color:#e8e4de;font-weight:600">23 / 60</span>
+            </div>
+
+            <div style="display:flex;gap:12px;margin-bottom:8px;font-size:9px">
+              <span>CR:<span style="color:#c0582a">0.12</span></span>
+              <span>LJ:<span style="color:#c0582a">2.3</span></span>
+              <span>P:<span style="color:#c0582a">0.45</span></span>
+              <span>E:<span style="color:#c0582a">0.08</span></span>
+            </div>
+
+            <div style="display:flex;justify-content:space-between;margin-bottom:4px">
+              <span>Current</span>
+              <span style="color:#c0582a">34,201</span>
+            </div>
+            <div style="display:flex;justify-content:space-between;margin-bottom:8px">
+              <span>Best</span>
+              <span style="color:#2e9450;font-weight:600">33,524 (0.7%)</span>
+            </div>
+
+            <!-- Chart placeholder -->
+            <div style="background:#12141a;border-radius:6px;height:60px;margin-bottom:10px;position:relative;overflow:hidden;border:1px solid #2a2d36">
+              <div style="position:absolute;bottom:20%;left:0;right:0;height:1px;border-top:1px dashed #2e9450;opacity:0.5"></div>
+              <!-- Dots -->
+              <div style="position:absolute;bottom:45%;left:8%;width:4px;height:4px;background:#c0582a;border-radius:50%;opacity:0.5"></div>
+              <div style="position:absolute;bottom:55%;left:14%;width:4px;height:4px;background:#c0582a;border-radius:50%;opacity:0.5"></div>
+              <div style="position:absolute;bottom:35%;left:20%;width:4px;height:4px;background:#c0582a;border-radius:50%;opacity:0.5"></div>
+              <div style="position:absolute;bottom:30%;left:26%;width:4px;height:4px;background:#c0582a;border-radius:50%;opacity:0.5"></div>
+              <div style="position:absolute;bottom:40%;left:32%;width:4px;height:4px;background:#c0582a;border-radius:50%;opacity:0.5"></div>
+              <div style="position:absolute;bottom:25%;left:38%;width:4px;height:4px;background:#c0582a;border-radius:50%;opacity:0.5"></div>
+              <!-- Best line -->
+              <svg style="position:absolute;inset:0;width:100%;height:100%" viewBox="0 0 100 100" preserveAspectRatio="none">
+                <polyline points="8,55 14,55 20,55 26,55 32,55 38,55" fill="none" stroke="#2e9450" stroke-width="1.5" vector-effect="non-scaling-stroke"/>
+              </svg>
+              <div style="position:absolute;top:4px;right:6px;font-size:8px;color:#555">trial 23/60</div>
+            </div>
+
+            <div style="display:flex;justify-content:space-between;margin-bottom:10px;font-size:9px">
+              <span>Best params</span>
+              <span style="color:#2e9450">CR:0.08 LJ:1.8 P:0.32 E:0.06</span>
+            </div>
+
+            <button style="width:100%;background:#c0582a;color:white;border:none;padding:6px;border-radius:6px;font-family:inherit;font-size:10px;font-weight:600;cursor:pointer;letter-spacing:1px">STOP &amp; USE BEST</button>
+          </div>
+
+          <!-- Right panel hint -->
+          <div style="position:absolute;right:0;top:0;bottom:0;width:60px;background:rgba(28,30,36,0.5);border-left:1px solid #2a2d36"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="option" data-choice="b" onclick="toggleSelect(this)">
+    <div class="letter">B</div>
+    <div class="content">
+      <h3>Replace Control Panel</h3>
+      <p>The right-side control panel transforms into an optimization panel during the run. Sliders are replaced with progress display, convergence chart, and parameter selection checkboxes. Reverts to normal controls when done.</p>
+      <div class="mockup" style="margin-top:12px">
+        <div class="mockup-body" style="background:#1a1c22;position:relative;height:280px;overflow:hidden;display:flex">
+          <!-- Canvas area -->
+          <div style="flex:1;background:radial-gradient(circle at 50% 50%, #1e2028 0%, #14161a 100%)"></div>
+
+          <!-- Right panel as optimizer -->
+          <div style="width:220px;background:#1c1e24;border-left:1px solid #2a2d36;padding:12px;font-family:'JetBrains Mono',monospace;font-size:9px;color:#a0a4b0;overflow-y:auto">
+            <div style="font-size:8px;letter-spacing:2px;color:#c0582a;margin-bottom:10px;font-weight:600;text-transform:uppercase">Optimization</div>
+
+            <div style="display:flex;justify-content:space-between;margin-bottom:6px">
+              <span>Trial</span>
+              <span style="color:#e8e4de;font-weight:600">23 / 60</span>
+            </div>
+
+            <div style="display:flex;justify-content:space-between;margin-bottom:4px">
+              <span>Current</span>
+              <span style="color:#c0582a">34,201</span>
+            </div>
+            <div style="display:flex;justify-content:space-between;margin-bottom:8px">
+              <span>Best</span>
+              <span style="color:#2e9450;font-weight:600">33,524</span>
+            </div>
+            <div style="display:flex;justify-content:space-between;margin-bottom:8px">
+              <span>Gap</span>
+              <span style="color:#2e9450">0.7%</span>
+            </div>
+
+            <!-- Chart -->
+            <div style="background:#12141a;border-radius:4px;height:50px;margin-bottom:8px;border:1px solid #2a2d36"></div>
+
+            <div style="font-size:8px;color:#666;margin-bottom:6px;text-transform:uppercase;letter-spacing:1px">Parameters</div>
+            <div style="font-size:8px;color:#2e9450;margin-bottom:8px;line-height:1.6">
+              CR: 0.08<br>LJ: 1.8<br>P: 0.32<br>E: 0.06
+            </div>
+
+            <div style="border-top:1px solid #2a2d36;padding-top:8px;margin-top:4px">
+              <div style="font-size:8px;color:#666;margin-bottom:6px;text-transform:uppercase;letter-spacing:1px">Mode</div>
+              <div style="display:flex;gap:4px;margin-bottom:8px">
+                <div style="flex:1;text-align:center;padding:4px;background:#c0582a;color:white;border-radius:4px;font-size:8px">FAST</div>
+                <div style="flex:1;text-align:center;padding:4px;background:#2a2d36;color:#888;border-radius:4px;font-size:8px">VISUAL</div>
+              </div>
+            </div>
+
+            <button style="width:100%;background:#c0582a;color:white;border:none;padding:5px;border-radius:4px;font-family:inherit;font-size:9px;font-weight:600;cursor:pointer">STOP &amp; USE BEST</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>

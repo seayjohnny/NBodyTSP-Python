@@ -2,17 +2,18 @@ import { useState, useEffect, useRef } from 'react';
 import TourMap from './TourMap';
 import { THEMES, THEME_NAMES } from '../themes';
 
-function Slider({ label, value, min, max, step, fmt, onChange, theme }) {
+function Slider({ label, value, min, max, step, fmt, onChange, theme, animated }) {
   const display = fmt === 'd' ? Math.round(value) : value.toFixed(3);
   return (
     <div>
       <div className="flex justify-between text-[10px] font-mono uppercase tracking-wider" style={{ color: theme.textDim }}>
         <span>{label}</span>
-        <span style={{ color: theme.textBright }}>{display}</span>
+        <span style={{ color: theme.textBright, transition: animated ? 'color 0.2s' : undefined }}>{display}</span>
       </div>
       <input type="range" min={min} max={max} step={step} value={value}
         onChange={e => onChange(parseFloat(e.target.value))}
-        className="w-full"
+        disabled={animated}
+        className={`w-full${animated ? ' slider-animated' : ''}`}
         style={{ background: theme.sliderTrack, accentColor: theme.accent }} />
     </div>
   );
@@ -48,8 +49,13 @@ export default function ControlPanel({ mode, theme, themeName, onThemeChange, se
   }, [metadata]);
 
   useEffect(() => {
-    if (!optimizing && bestOptResult?.best_params) {
-      setParams(p => ({ ...p, ...bestOptResult.best_params }));
+    if (bestOptResult?.best_params) {
+      // During optimization: show current trial params
+      // After optimization: show best params
+      const trialParams = optimizing ? bestOptResult.params : bestOptResult.best_params;
+      if (trialParams) {
+        setParams(p => ({ ...p, ...trialParams }));
+      }
     }
   }, [bestOptResult, optimizing]);
 
@@ -86,29 +92,29 @@ export default function ControlPanel({ mode, theme, themeName, onThemeChange, se
       <div className="p-4 space-y-3 flex-1">
         {/* Common parameters */}
         <Slider label="Collapse Rate" value={params.collapse_rate} min={0.001} max={0.5} step={0.001}
-          onChange={v => setP('collapse_rate', v)} theme={t} />
+          onChange={v => setP('collapse_rate', v)} theme={t} animated={optimizing} />
         <Slider label="Epsilon" value={params.epsilon} min={0.01} max={0.3} step={0.01}
-          onChange={v => setP('epsilon', v)} theme={t} />
+          onChange={v => setP('epsilon', v)} theme={t} animated={optimizing} />
         <Slider label="LJ Strength" value={params.lj_strength} min={0.1} max={5} step={0.1}
-          onChange={v => setP('lj_strength', v)} theme={t} />
+          onChange={v => setP('lj_strength', v)} theme={t} animated={optimizing} />
         <Slider label="Damping" value={params.damping} min={0.5} max={1.0} step={0.01}
-          onChange={v => setP('damping', v)} theme={t} />
+          onChange={v => setP('damping', v)} theme={t} animated={optimizing} />
         <Slider label="DT" value={params.dt} min={0.001} max={0.05} step={0.001}
-          onChange={v => setP('dt', v)} theme={t} />
+          onChange={v => setP('dt', v)} theme={t} animated={optimizing} />
 
         {/* Planar-specific */}
         {mode === '2d' && (
           <Slider label="Wall Strength" value={params.wall_strength} min={100} max={50000} step={100} fmt="d"
-            onChange={v => setP('wall_strength', v)} theme={t} />
+            onChange={v => setP('wall_strength', v)} theme={t} animated={optimizing} />
         )}
 
         {/* Torus-specific */}
         {mode === 'torus' && (
           <Slider label="Perturbation" value={params.perturbation} min={0} max={1} step={0.05}
-            onChange={v => setP('perturbation', v)} theme={t} />
+            onChange={v => setP('perturbation', v)} theme={t} animated={optimizing} />
         )}
 
-        <Slider label="Speed" value={params.substeps} min={1} max={64} step={1} fmt="d"
+        <Slider label="Speed" value={params.substeps} min={1} max={256} step={1} fmt="d"
           onChange={v => setP('substeps', v)} theme={t} />
 
         {/* Buttons */}

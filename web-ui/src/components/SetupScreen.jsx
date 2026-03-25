@@ -5,7 +5,7 @@ export default function SetupScreen({ onStart }) {
   const [datasets, setDatasets] = useState([]);
   const [gpuAvailable, setGpuAvailable] = useState(false);
   const [config, setConfig] = useState({
-    dataset_path: '', mode: 'torus', wall_force_mode: 'linear', force_mode: 'piecewise',
+    dataset_path: '', mode: 'torus', wall_force_mode: 'inverse_square', force_mode: 'true_lj',
     theme: 'dark', use_gpu: true,
   });
 
@@ -48,23 +48,19 @@ export default function SetupScreen({ onStart }) {
             </select>
           </Field>
 
-          {config.mode === '2d' && (
-            <>
-              <Field label="Particle Force Model">
-                <select value={config.force_mode} onChange={set('force_mode')} className="select-field">
-                  <option value="piecewise">Piecewise LJ</option>
-                  <option value="smooth">Smooth LJ</option>
-                  <option value="true_lj">True LJ (12-6)</option>
-                </select>
-              </Field>
-              <Field label="Wall Force Model">
-                <select value={config.wall_force_mode} onChange={set('wall_force_mode')} className="select-field">
-                  <option value="linear">Linear Spring</option>
-                  <option value="inverse_square">Inverse Square</option>
-                </select>
-              </Field>
-            </>
-          )}
+          <Field label="Particle Force Model">
+            <select value={config.force_mode} onChange={set('force_mode')} className="select-field">
+              <option value="piecewise">Piecewise LJ</option>
+              <option value="smooth">Smooth LJ</option>
+              <option value="true_lj">True LJ (12-6)</option>
+            </select>
+          </Field>
+          <Field label="Wall Force Model">
+            <select value={config.wall_force_mode} onChange={set('wall_force_mode')} className="select-field">
+              <option value="linear">Linear Spring</option>
+              <option value="inverse_square">Inverse Square</option>
+            </select>
+          </Field>
 
           <div className="flex items-center gap-3">
             <label className="flex items-center gap-2 cursor-pointer">

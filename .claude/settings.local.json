@@ -6,7 +6,9 @@
       "WebFetch(domain:github.com)",
       "WebFetch(domain:stackabuse.com)",
       "Bash(export PATH=\"/c/Program Files/nodejs:$PATH\")",
-      "Bash(npm run:*)"
+      "Bash(npm run:*)",
+      "Bash(ls:*)",
+      "Bash(.venv/Scripts/python.exe -c \"from tsp_nbody.optimizer import BayesianOptimizer, TORUS_PARAM_NAMES; print\\(''OK'', TORUS_PARAM_NAMES\\)\")"
     ]
   }
 }

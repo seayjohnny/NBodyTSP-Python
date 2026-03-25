@@ -59,8 +59,8 @@ export default function OptimizeModal({ mode, theme, onStart, onClose }) {
     >
       <div
         style={{
-          background: '#1c1e24',
-          border: '1px solid #3a3d48',
+          background: t.panelBg,
+          border: `1px solid ${t.panelBorder}`,
           borderRadius: 12,
           padding: '20px 24px',
           maxWidth: 400,
@@ -87,8 +87,8 @@ export default function OptimizeModal({ mode, theme, onStart, onClose }) {
               <label
                 key={p.name}
                 style={{
-                  background: '#14161a',
-                  border: '1px solid #2a2d36',
+                  background: t.selectBg,
+                  border: `1px solid ${t.panelBorder}`,
                   borderRadius: 6,
                   padding: '6px 8px',
                   display: 'flex',
@@ -127,8 +127,8 @@ export default function OptimizeModal({ mode, theme, onStart, onClose }) {
             onChange={e => setMaxTrials(Math.max(1, parseInt(e.target.value) || 1))}
             className="font-mono text-xs"
             style={{
-              background: '#14161a',
-              border: '1px solid #2a2d36',
+              background: t.selectBg,
+              border: `1px solid ${t.panelBorder}`,
               borderRadius: 6,
               padding: '6px 10px',
               color: t.textBright,
@@ -143,7 +143,7 @@ export default function OptimizeModal({ mode, theme, onStart, onClose }) {
           <div className="font-mono text-[10px] uppercase tracking-wider" style={{ color: t.textDim, marginBottom: 6 }}>
             Mode
           </div>
-          <div style={{ display: 'flex', borderRadius: 6, overflow: 'hidden', border: '1px solid #2a2d36' }}>
+          <div style={{ display: 'flex', borderRadius: 6, overflow: 'hidden', border: `1px solid ${t.panelBorder}` }}>
             {['fast', 'visual'].map(m => (
               <button
                 key={m}
@@ -154,7 +154,7 @@ export default function OptimizeModal({ mode, theme, onStart, onClose }) {
                   padding: '6px 0',
                   border: 'none',
                   cursor: 'pointer',
-                  background: optMode === m ? t.accent : '#14161a',
+                  background: optMode === m ? t.accent : t.selectBg,
                   color: optMode === m ? '#fff' : t.textDim,
                   fontWeight: optMode === m ? 600 : 400,
                   transition: 'background 0.15s, color 0.15s',
@@ -174,7 +174,7 @@ export default function OptimizeModal({ mode, theme, onStart, onClose }) {
             style={{
               padding: '7px 18px',
               borderRadius: 6,
-              border: '1px solid #3a3d48',
+              border: `1px solid ${t.panelBorder}`,
               background: 'transparent',
               color: t.textDim,
               cursor: 'pointer',
