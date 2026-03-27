@@ -433,7 +433,10 @@ class PhysicsEngine(BasePhysicsEngine):
         # Collapse progression
         if self.geometry == "planar":
             self.inner_radius += self.collapse_rate
-            if self.inner_radius + self.collapse_rate * 10 >= self.outer_radius:
+            gap = self.outer_radius - self.inner_radius
+            if gap <= self.epsilon:
+                self.inner_radius = self.outer_radius - self.epsilon
+                self.collapsed = True
                 self.finished = True
                 self._extract_tour()
         elif self.geometry == "torus":

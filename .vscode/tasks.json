@@ -1,0 +1,62 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Backend: Start Server",
+      "type": "shell",
+      "command": "${workspaceFolder}/.venv/Scripts/python",
+      "args": ["-m", "tsp_nbody.server"],
+      "isBackground": true,
+      "problemMatcher": {
+        "pattern": {
+          "regexp": "^.*$",
+          "file": 1,
+          "message": 0
+        },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": "^.*Uvicorn running.*$",
+          "endsPattern": "^.*Application startup complete.*$"
+        }
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "group": "dev"
+      }
+    },
+    {
+      "label": "Web UI: Dev Server",
+      "type": "shell",
+      "command": "npm",
+      "args": ["run", "dev"],
+      "options": {
+        "cwd": "${workspaceFolder}/web-ui"
+      },
+      "isBackground": true,
+      "problemMatcher": {
+        "pattern": {
+          "regexp": "^.*$",
+          "file": 1,
+          "message": 0
+        },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": "^.*VITE.*$",
+          "endsPattern": "^.*ready in.*$"
+        }
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "group": "dev"
+      }
+    },
+    {
+      "label": "Start All",
+      "dependsOn": ["Backend: Start Server", "Web UI: Dev Server"],
+      "dependsOrder": "parallel",
+      "problemMatcher": []
+    }
+  ]
+}
